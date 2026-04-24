@@ -1,0 +1,166 @@
+{
+  "version": "8.4.36",
+  "source": "https://raw.githubusercontent.com/ultralytics/ultralytics/v8.4.36/ultralytics/engine/exporter.py",
+  "formats": [
+    {
+      "id": "torchscript",
+      "label": "PyTorch 脚本格式（TorchScript）",
+      "arguments": [
+        "batch",
+        "optimize",
+        "half",
+        "nms",
+        "dynamic"
+      ]
+    },
+    {
+      "id": "onnx",
+      "label": "通用交换格式（ONNX）",
+      "arguments": [
+        "batch",
+        "dynamic",
+        "half",
+        "opset",
+        "simplify",
+        "nms"
+      ]
+    },
+    {
+      "id": "openvino",
+      "label": "英特尔推理格式（OpenVINO）",
+      "arguments": [
+        "batch",
+        "dynamic",
+        "half",
+        "int8",
+        "nms",
+        "fraction"
+      ]
+    },
+    {
+      "id": "engine",
+      "label": "TensorRT 引擎（TensorRT Engine）",
+      "arguments": [
+        "batch",
+        "dynamic",
+        "half",
+        "int8",
+        "simplify",
+        "nms",
+        "fraction"
+      ]
+    },
+    {
+      "id": "coreml",
+      "label": "苹果部署格式（CoreML）",
+      "arguments": [
+        "batch",
+        "dynamic",
+        "half",
+        "int8",
+        "nms"
+      ]
+    },
+    {
+      "id": "saved_model",
+      "label": "TensorFlow 模型目录（SavedModel）",
+      "arguments": [
+        "batch",
+        "int8",
+        "keras",
+        "nms"
+      ]
+    },
+    {
+      "id": "pb",
+      "label": "TensorFlow 计算图（GraphDef）",
+      "arguments": [
+        "batch"
+      ]
+    },
+    {
+      "id": "tflite",
+      "label": "轻量部署格式（TensorFlow Lite）",
+      "arguments": [
+        "batch",
+        "half",
+        "int8",
+        "nms",
+        "fraction"
+      ]
+    },
+    {
+      "id": "edgetpu",
+      "label": "边缘 TPU 格式（Edge TPU）",
+      "arguments": []
+    },
+    {
+      "id": "tfjs",
+      "label": "网页部署格式（TensorFlow.js）",
+      "arguments": [
+        "batch",
+        "half",
+        "int8",
+        "nms"
+      ]
+    },
+    {
+      "id": "paddle",
+      "label": "飞桨格式（PaddlePaddle）",
+      "arguments": [
+        "batch"
+      ]
+    },
+    {
+      "id": "mnn",
+      "label": "移动推理格式（MNN）",
+      "arguments": [
+        "batch",
+        "half",
+        "int8"
+      ]
+    },
+    {
+      "id": "ncnn",
+      "label": "移动推理格式（NCNN）",
+      "arguments": [
+        "batch",
+        "half"
+      ]
+    },
+    {
+      "id": "imx",
+      "label": "恩智浦部署格式（IMX）",
+      "arguments": [
+        "int8",
+        "fraction",
+        "nms"
+      ]
+    },
+    {
+      "id": "rknn",
+      "label": "瑞芯微部署格式（RKNN）",
+      "arguments": [
+        "batch",
+        "name"
+      ]
+    },
+    {
+      "id": "executorch",
+      "label": "轻量执行格式（ExecuTorch）",
+      "arguments": [
+        "batch"
+      ]
+    },
+    {
+      "id": "axelera",
+      "label": "Axelera 加速格式（Axelera）",
+      "arguments": [
+        "batch",
+        "int8",
+        "fraction",
+        "data"
+      ]
+    }
+  ]
+}

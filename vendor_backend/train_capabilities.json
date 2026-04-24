@@ -1,0 +1,808 @@
+{
+  "version": "8.4.36",
+  "source": "https://raw.githubusercontent.com/ultralytics/ultralytics/v8.4.36/ultralytics/cfg/default.yaml",
+  "tasks": [
+    "detect",
+    "segment",
+    "classify",
+    "pose",
+    "obb"
+  ],
+  "groups": [
+    {
+      "id": "basic",
+      "label": "基础训练",
+      "parameters": [
+        {
+          "key": "epochs",
+          "types": [
+            "int"
+          ],
+          "default": 100,
+          "description": "训练轮次"
+        },
+        {
+          "key": "time",
+          "types": [
+            "float"
+          ],
+          "default": null,
+          "optional": true,
+          "description": "最大训练时长（小时）；设置后会覆盖 epochs"
+        },
+        {
+          "key": "batch",
+          "types": [
+            "int",
+            "float"
+          ],
+          "default": 16,
+          "description": "批次大小，可填整数或 AutoBatch 比例"
+        },
+        {
+          "key": "imgsz",
+          "types": [
+            "int",
+            "list"
+          ],
+          "default": 640,
+          "description": "训练图像尺寸，可填整数或 [高, 宽]"
+        },
+        {
+          "key": "cache",
+          "types": [
+            "bool",
+            "string"
+          ],
+          "default": false,
+          "options": [
+            false,
+            true,
+            "ram",
+            "disk"
+          ],
+          "description": "将图片缓存到内存或磁盘"
+        },
+        {
+          "key": "device",
+          "types": [
+            "int",
+            "string",
+            "list"
+          ],
+          "default": null,
+          "optional": true,
+          "description": "设备 ID、设备字符串或设备列表"
+        },
+        {
+          "key": "workers",
+          "types": [
+            "int"
+          ],
+          "default": 8,
+          "description": "每个 rank 的数据加载线程数"
+        },
+        {
+          "key": "project",
+          "types": [
+            "string"
+          ],
+          "default": null,
+          "optional": true,
+          "description": "结果根目录"
+        },
+        {
+          "key": "name",
+          "types": [
+            "string"
+          ],
+          "default": null,
+          "optional": true,
+          "description": "project 下的实验名称"
+        },
+        {
+          "key": "exist_ok",
+          "types": [
+            "bool"
+          ],
+          "default": false,
+          "description": "为 true 时覆盖已存在的 project/name"
+        },
+        {
+          "key": "pretrained",
+          "types": [
+            "bool",
+            "string"
+          ],
+          "default": true,
+          "description": "使用预训练权重或自定义权重路径"
+        },
+        {
+          "key": "verbose",
+          "types": [
+            "bool"
+          ],
+          "default": true,
+          "description": "训练和验证时输出详细日志"
+        },
+        {
+          "key": "seed",
+          "types": [
+            "int"
+          ],
+          "default": 0,
+          "description": "用于复现的随机种子"
+        },
+        {
+          "key": "deterministic",
+          "types": [
+            "bool"
+          ],
+          "default": true,
+          "description": "启用确定性运算"
+        },
+        {
+          "key": "resume",
+          "types": [
+            "bool"
+          ],
+          "default": false,
+          "description": "从提供的 checkpoint 恢复训练"
+        }
+      ]
+    },
+    {
+      "id": "save_val",
+      "label": "保存与验证",
+      "parameters": [
+        {
+          "key": "save",
+          "types": [
+            "bool"
+          ],
+          "default": true,
+          "description": "保存 checkpoint 和结果"
+        },
+        {
+          "key": "save_period",
+          "types": [
+            "int"
+          ],
+          "default": -1,
+          "description": "每 N 轮保存一次 checkpoint；小于 1 时禁用"
+        },
+        {
+          "key": "profile",
+          "types": [
+            "bool"
+          ],
+          "default": false,
+          "description": "训练期间分析 ONNX 和 TensorRT 速度"
+        },
+        {
+          "key": "val",
+          "types": [
+            "bool"
+          ],
+          "default": true,
+          "description": "训练期间执行验证"
+        },
+        {
+          "key": "split",
+          "types": [
+            "string"
+          ],
+          "default": "val",
+          "options": [
+            "val",
+            "test",
+            "train"
+          ],
+          "description": "选择要评估的数据集划分"
+        },
+        {
+          "key": "save_json",
+          "types": [
+            "bool"
+          ],
+          "default": false,
+          "tasks": [
+            "detect",
+            "segment",
+            "pose",
+            "obb"
+          ],
+          "description": "将验证结果保存为 COCO JSON"
+        },
+        {
+          "key": "conf",
+          "types": [
+            "float"
+          ],
+          "default": null,
+          "optional": true,
+          "tasks": [
+            "detect",
+            "segment",
+            "pose",
+            "obb"
+          ],
+          "description": "验证使用的置信度阈值"
+        },
+        {
+          "key": "iou",
+          "types": [
+            "float"
+          ],
+          "default": 0.7,
+          "tasks": [
+            "detect",
+            "segment",
+            "pose",
+            "obb"
+          ],
+          "description": "NMS 使用的 IoU 阈值"
+        },
+        {
+          "key": "max_det",
+          "types": [
+            "int"
+          ],
+          "default": 300,
+          "tasks": [
+            "detect",
+            "segment",
+            "pose",
+            "obb"
+          ],
+          "description": "每张图的最大检测数"
+        },
+        {
+          "key": "half",
+          "types": [
+            "bool"
+          ],
+          "default": false,
+          "tasks": [
+            "detect",
+            "segment",
+            "pose",
+            "obb"
+          ],
+          "description": "验证时使用半精度"
+        },
+        {
+          "key": "dnn",
+          "types": [
+            "bool"
+          ],
+          "default": false,
+          "tasks": [
+            "detect",
+            "segment",
+            "pose",
+            "obb"
+          ],
+          "description": "验证 ONNX 时使用 OpenCV DNN"
+        },
+        {
+          "key": "plots",
+          "types": [
+            "bool"
+          ],
+          "default": true,
+          "description": "在训练/验证期间保存图表和可视化输出"
+        }
+      ]
+    },
+    {
+      "id": "optimization",
+      "label": "优化与调度",
+      "parameters": [
+        {
+          "key": "patience",
+          "types": [
+            "int"
+          ],
+          "default": 100,
+          "description": "连续 N 轮无提升后提前停止"
+        },
+        {
+          "key": "optimizer",
+          "types": [
+            "string"
+          ],
+          "default": "auto",
+          "options": [
+            "auto",
+            "SGD",
+            "MuSGD",
+            "Adam",
+            "Adamax",
+            "AdamW",
+            "NAdam",
+            "RAdam",
+            "RMSProp"
+          ],
+          "description": "优化器选择"
+        },
+        {
+          "key": "cos_lr",
+          "types": [
+            "bool"
+          ],
+          "default": false,
+          "description": "使用余弦学习率调度器"
+        },
+        {
+          "key": "close_mosaic",
+          "types": [
+            "int"
+          ],
+          "default": 10,
+          "tasks": [
+            "detect",
+            "segment",
+            "pose",
+            "obb"
+          ],
+          "description": "最后 N 轮关闭 mosaic"
+        },
+        {
+          "key": "amp",
+          "types": [
+            "bool"
+          ],
+          "default": true,
+          "description": "启用自动混合精度训练"
+        },
+        {
+          "key": "fraction",
+          "types": [
+            "float"
+          ],
+          "default": 1.0,
+          "description": "使用训练数据集的采样比例"
+        },
+        {
+          "key": "freeze",
+          "types": [
+            "int",
+            "list"
+          ],
+          "default": null,
+          "optional": true,
+          "description": "冻结前 N 层或指定层索引"
+        },
+        {
+          "key": "multi_scale",
+          "types": [
+            "float"
+          ],
+          "default": 0.0,
+          "tasks": [
+            "detect",
+            "segment",
+            "pose",
+            "obb"
+          ],
+          "description": "多尺度范围，相对 imgsz 的比例"
+        },
+        {
+          "key": "compile",
+          "types": [
+            "bool",
+            "string"
+          ],
+          "default": false,
+          "options": [
+            false,
+            true,
+            "default",
+            "reduce-overhead",
+            "max-autotune-no-cudagraphs"
+          ],
+          "description": "启用 torch.compile，可选后端预设"
+        },
+        {
+          "key": "lr0",
+          "types": [
+            "float"
+          ],
+          "default": 0.01,
+          "description": "初始学习率"
+        },
+        {
+          "key": "lrf",
+          "types": [
+            "float"
+          ],
+          "default": 0.01,
+          "description": "最终学习率比例"
+        },
+        {
+          "key": "momentum",
+          "types": [
+            "float"
+          ],
+          "default": 0.937,
+          "description": "SGD 动量或 Adam beta1"
+        },
+        {
+          "key": "weight_decay",
+          "types": [
+            "float"
+          ],
+          "default": 0.0005,
+          "description": "权重衰减"
+        },
+        {
+          "key": "warmup_epochs",
+          "types": [
+            "float"
+          ],
+          "default": 3.0,
+          "description": "预热轮次"
+        },
+        {
+          "key": "warmup_momentum",
+          "types": [
+            "float"
+          ],
+          "default": 0.8,
+          "description": "预热阶段的初始动量"
+        },
+        {
+          "key": "warmup_bias_lr",
+          "types": [
+            "float"
+          ],
+          "default": 0.1,
+          "description": "预热阶段的 bias 学习率"
+        },
+        {
+          "key": "nbs",
+          "types": [
+            "int"
+          ],
+          "default": 64,
+          "description": "用于损失归一化的名义 batch 大小"
+        }
+      ]
+    },
+    {
+      "id": "augmentation",
+      "label": "增强超参数",
+      "parameters": [
+        {
+          "key": "single_cls",
+          "types": [
+            "bool"
+          ],
+          "default": false,
+          "tasks": [
+            "detect",
+            "segment",
+            "pose",
+            "obb"
+          ],
+          "description": "将所有类别视为单一类别"
+        },
+        {
+          "key": "rect",
+          "types": [
+            "bool"
+          ],
+          "default": false,
+          "tasks": [
+            "detect",
+            "segment",
+            "pose",
+            "obb"
+          ],
+          "description": "使用矩形批次"
+        },
+        {
+          "key": "classes",
+          "types": [
+            "int",
+            "list"
+          ],
+          "default": null,
+          "optional": true,
+          "description": "仅训练指定类别 ID"
+        },
+        {
+          "key": "hsv_h",
+          "types": [
+            "float"
+          ],
+          "default": 0.015,
+          "description": "HSV 色相增强比例"
+        },
+        {
+          "key": "hsv_s",
+          "types": [
+            "float"
+          ],
+          "default": 0.7,
+          "description": "HSV 饱和度增强比例"
+        },
+        {
+          "key": "hsv_v",
+          "types": [
+            "float"
+          ],
+          "default": 0.4,
+          "description": "HSV 明度增强比例"
+        },
+        {
+          "key": "degrees",
+          "types": [
+            "float"
+          ],
+          "default": 0.0,
+          "description": "旋转角度"
+        },
+        {
+          "key": "translate",
+          "types": [
+            "float"
+          ],
+          "default": 0.1,
+          "description": "平移比例"
+        },
+        {
+          "key": "scale",
+          "types": [
+            "float"
+          ],
+          "default": 0.5,
+          "description": "缩放增益"
+        },
+        {
+          "key": "shear",
+          "types": [
+            "float"
+          ],
+          "default": 0.0,
+          "description": "剪切角度"
+        },
+        {
+          "key": "perspective",
+          "types": [
+            "float"
+          ],
+          "default": 0.0,
+          "description": "透视变换比例"
+        },
+        {
+          "key": "flipud",
+          "types": [
+            "float"
+          ],
+          "default": 0.0,
+          "description": "垂直翻转概率"
+        },
+        {
+          "key": "fliplr",
+          "types": [
+            "float"
+          ],
+          "default": 0.5,
+          "description": "水平翻转概率"
+        },
+        {
+          "key": "bgr",
+          "types": [
+            "float"
+          ],
+          "default": 0.0,
+          "description": "RGB/BGR 通道交换概率"
+        },
+        {
+          "key": "mosaic",
+          "types": [
+            "float"
+          ],
+          "default": 1.0,
+          "description": "Mosaic 增强概率"
+        },
+        {
+          "key": "mixup",
+          "types": [
+            "float"
+          ],
+          "default": 0.0,
+          "description": "MixUp 增强概率"
+        },
+        {
+          "key": "cutmix",
+          "types": [
+            "float"
+          ],
+          "default": 0.0,
+          "description": "CutMix 增强概率"
+        },
+        {
+          "key": "copy_paste",
+          "types": [
+            "float"
+          ],
+          "default": 0.0,
+          "tasks": [
+            "segment"
+          ],
+          "description": "分割任务的 Copy-Paste 概率"
+        },
+        {
+          "key": "copy_paste_mode",
+          "types": [
+            "string"
+          ],
+          "default": "flip",
+          "tasks": [
+            "segment"
+          ],
+          "options": [
+            "flip",
+            "mixup"
+          ],
+          "description": "分割任务的 Copy-Paste 策略"
+        },
+        {
+          "key": "auto_augment",
+          "types": [
+            "string"
+          ],
+          "default": "randaugment",
+          "tasks": [
+            "classify"
+          ],
+          "options": [
+            "randaugment",
+            "autoaugment",
+            "augmix"
+          ],
+          "description": "分类任务的自动增强策略"
+        },
+        {
+          "key": "erasing",
+          "types": [
+            "float"
+          ],
+          "default": 0.4,
+          "tasks": [
+            "classify"
+          ],
+          "description": "分类任务的随机擦除概率"
+        }
+      ]
+    },
+    {
+      "id": "loss_task",
+      "label": "损失与任务专属",
+      "parameters": [
+        {
+          "key": "overlap_mask",
+          "types": [
+            "bool"
+          ],
+          "default": true,
+          "tasks": [
+            "segment"
+          ],
+          "description": "分割训练时合并实例掩码"
+        },
+        {
+          "key": "mask_ratio",
+          "types": [
+            "int"
+          ],
+          "default": 4,
+          "tasks": [
+            "segment"
+          ],
+          "description": "分割任务的掩码下采样比例"
+        },
+        {
+          "key": "dropout",
+          "types": [
+            "float"
+          ],
+          "default": 0.0,
+          "tasks": [
+            "classify"
+          ],
+          "description": "分类头的 dropout 比例"
+        },
+        {
+          "key": "box",
+          "types": [
+            "float"
+          ],
+          "default": 7.5,
+          "tasks": [
+            "detect",
+            "segment",
+            "pose",
+            "obb"
+          ],
+          "description": "框损失权重"
+        },
+        {
+          "key": "cls",
+          "types": [
+            "float"
+          ],
+          "default": 0.5,
+          "tasks": [
+            "detect",
+            "segment",
+            "pose",
+            "obb"
+          ],
+          "description": "分类损失权重"
+        },
+        {
+          "key": "dfl",
+          "types": [
+            "float"
+          ],
+          "default": 1.5,
+          "tasks": [
+            "detect",
+            "segment",
+            "pose",
+            "obb"
+          ],
+          "description": "分布焦点损失权重"
+        },
+        {
+          "key": "pose",
+          "types": [
+            "float"
+          ],
+          "default": 12.0,
+          "tasks": [
+            "pose"
+          ],
+          "description": "姿态损失权重"
+        },
+        {
+          "key": "kobj",
+          "types": [
+            "float"
+          ],
+          "default": 1.0,
+          "tasks": [
+            "pose"
+          ],
+          "description": "关键点目标损失权重"
+        },
+        {
+          "key": "rle",
+          "types": [
+            "float"
+          ],
+          "default": 1.0,
+          "tasks": [
+            "pose"
+          ],
+          "description": "RLE 损失权重"
+        },
+        {
+          "key": "angle",
+          "types": [
+            "float"
+          ],
+          "default": 1.0,
+          "tasks": [
+            "obb"
+          ],
+          "description": "旋转角度损失权重"
+        }
+      ]
+    }
+  ]
+}
