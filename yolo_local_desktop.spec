@@ -4,10 +4,12 @@ from pathlib import Path
 
 
 project_dir = Path.cwd()
+app_name = "YOLO训练工具"
+
 datas = [
     (str(project_dir / "backend.py"), "."),
     (str(project_dir / "README.md"), "."),
-    (str(project_dir / "操作说明.txt"), "."),
+    (str(project_dir / "USER_GUIDE.txt"), "."),
     (str(project_dir / "requirements.txt"), "."),
     (str(project_dir / "assets" / "yolotool_icon.png"), "assets"),
     (str(project_dir / "assets" / "yolotool_icon.ico"), "assets"),
@@ -43,7 +45,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name="YOLO训练工具",
+    name=app_name,
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -64,5 +66,5 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name="YOLO训练工具",
+    name=app_name,
 )

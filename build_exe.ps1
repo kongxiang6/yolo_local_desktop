@@ -32,9 +32,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $distRoot 'runtime\python\python.exe
 if (Test-Path -LiteralPath (Join-Path $deliveryDir 'README_FOR_SHARE.txt')) {
     Copy-Item -LiteralPath (Join-Path $deliveryDir 'README_FOR_SHARE.txt') -Destination (Join-Path $distRoot 'README_FOR_SHARE.txt') -Force
 }
-$localGuide = Get-ChildItem -LiteralPath $project -File -Filter '*.txt' -ErrorAction SilentlyContinue |
-    Where-Object { $_.Name -ne 'requirements.txt' } |
-    Select-Object -First 1 -ExpandProperty FullName
+$localGuide = Join-Path $project 'USER_GUIDE.txt'
 if ($localGuide -and (Test-Path -LiteralPath $localGuide)) {
     Copy-Item -LiteralPath $localGuide -Destination (Join-Path $distRoot (Split-Path $localGuide -Leaf)) -Force
 }
@@ -58,7 +56,7 @@ if (Test-Path -LiteralPath $zipPath) {
 }
 Compress-Archive -Path $releaseDir -DestinationPath $zipPath
 
-$githubZipPath = Join-Path $releaseRoot ((Split-Path $releaseDir -Leaf) + '_github_no_runtime.zip')
+$githubZipPath = Join-Path $releaseRoot 'YOLO_training_tool_github_no_runtime.zip'
 $githubStage = Join-Path $githubStageRoot (Split-Path $releaseDir -Leaf)
 if (Test-Path -LiteralPath $githubStageRoot) {
     Remove-Item -LiteralPath $githubStageRoot -Recurse -Force

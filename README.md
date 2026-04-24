@@ -22,6 +22,7 @@
 - [项目目录结构](#项目目录结构)
 - [开发与打包](#开发与打包)
 - [发布建议](#发布建议)
+- [变更记录](#变更记录)
 - [常见问题](#常见问题)
 - [已完成的体验优化](#已完成的体验优化)
 - [后续可增强方向](#后续可增强方向)
@@ -440,7 +441,7 @@ yolo_local_desktop/
 ├─ backend.py                     # 后台任务执行入口
 ├─ build_exe.ps1                  # 打包脚本
 ├─ README.md                      # GitHub 项目说明
-├─ 操作说明.txt                    # 面向普通用户的详细操作说明
+├─ USER_GUIDE.txt                 # 面向普通用户的详细操作说明
 ├─ contracts/                     # 参数定义
 ├─ vendor_backend/                # 环境、数据整理、YOLO 任务辅助逻辑
 ├─ presets/                       # 预设目录
@@ -470,7 +471,7 @@ powershell -ExecutionPolicy Bypass -File I:\AI\yolo_local_desktop\build_exe.ps1
 
 - `release/YOLO训练工具`
 - `release/YOLO训练工具_share.zip`
-- `release/YOLO训练工具_github_no_runtime.zip`
+- `release/YOLO_training_tool_github_no_runtime.zip`
 
 ---
 
@@ -482,13 +483,21 @@ powershell -ExecutionPolicy Bypass -File I:\AI\yolo_local_desktop\build_exe.ps1
 2. 提醒对方先完整解压
 3. 直接运行 `YOLO训练工具.exe`
 4. 第一次先点“在线一键配置环境”
+5. 不要让对方自己去运行中间文件
 
 如果是上传到 GitHub 的发布页，建议优先上传：
 
-- `release/YOLO训练工具_github_no_runtime.zip`
+- `release/YOLO_training_tool_github_no_runtime.zip`
 
 这个版本不会包含 `runtime` 文件夹，更适合放到 GitHub Release；用户下载后首次运行时，再通过软件里的“在线一键配置环境”自动准备环境。
-5. 不要让对方自己去运行中间文件
+
+---
+
+## 变更记录
+
+- 标准变更记录文件：`CHANGELOG.md`
+- 建议发布前先更新 `CHANGELOG.md`，再同步创建 GitHub Release
+- 当前首个公开版本对应标签：`v1.0.0`
 
 ---
 
@@ -559,11 +568,13 @@ powershell -ExecutionPolicy Bypass -File I:\AI\yolo_local_desktop\build_exe.ps1
 
 如果是第一次接触这个软件，建议先看：
 
-- `I:\AI\yolo_local_desktop\操作说明.txt`
+- `I:\AI\yolo_local_desktop\USER_GUIDE.txt`
 - `I:\AI\yolo_local_desktop\delivery\README_FOR_SHARE.txt`
+- `I:\AI\yolo_local_desktop\CHANGELOG.md`
 
 其中：
 
 - `README.md` 更适合放到 GitHub 仓库首页
-- `操作说明.txt` 更适合直接给普通用户阅读
+- `USER_GUIDE.txt` 更适合直接给普通用户阅读
 - `README_FOR_SHARE.txt` 更适合跟打包版一起分发
+- `CHANGELOG.md` 更适合记录每个版本做了什么改动
