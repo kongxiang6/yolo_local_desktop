@@ -1549,7 +1549,7 @@ class App:
             row=0,
             label="Python 路径",
             widget=path_row,
-            description="这里决定实际调用哪个 Python 环境。优先建议使用内置 runtime；点“内置”时如果没检测到完整环境，会自动进入一键配置。",
+            description="这里决定实际调用哪个 Python 环境。优先建议使用内置 runtime；“在线一键配置环境”始终只会检查并配置软件内置 runtime。",
         )
 
         check_text = "检查当前环境" if scope == "train" else "检查并确认导出环境"
@@ -1593,7 +1593,7 @@ class App:
 
         note = tk.Label(
             parent,
-            text="一键配置会先检查当前环境：如果已可用，会先询问你是否还要更新；如果内置 runtime 缺失，会自动在线创建；随后再识别当前电脑是 CPU 还是 NVIDIA 环境，并按推荐方案安装 pip、torch、ultralytics、pillow、pyyaml。环境检查会验证 ultralytics、torch、yaml 是否可用，并把实际解释器路径与关键版本打印到左侧日志。",
+            text="一键配置只会检查并配置软件内置 runtime：如果内置环境已可用，会先询问你是否还要更新；如果内置 runtime 缺失，会自动在线创建；随后再识别当前电脑是 CPU 还是 NVIDIA 环境，并按推荐方案安装 pip、torch、ultralytics、pillow、pyyaml。环境检查会验证 ultralytics、torch、yaml 是否可用，并把实际解释器路径与关键版本打印到左侧日志。",
             bg=PANEL_BG,
             fg=TEXT_MUTED,
             wraplength=430,
@@ -2892,17 +2892,17 @@ class App:
         if state == "ready":
             python_path = str(probe.get("python") or self.python_var.get())
             torch_version = str(probe.get("torch_version") or "")
-            message = f"已检测到当前环境可直接使用：\nPython：{python_path}"
+            message = f"已检测到内置环境可直接使用：\nPython：{python_path}"
             if torch_version:
                 message += f"\nTorch：{torch_version}"
-            message += "\n\n如果继续，程序会联网检查并更新依赖。\n要继续更新环境吗？"
-            return messagebox.askyesno("环境已可用", message)
+            message += "\n\n如果继续，程序会联网检查并更新内置 runtime 的依赖。\n要继续更新吗？"
+            return messagebox.askyesno("内置环境已可用", message)
 
         if state == "needs-configure":
-            detail = str(probe.get("message") or "当前环境不完整，需要安装或更新依赖。")
+            detail = str(probe.get("message") or "内置环境不完整，需要安装或更新依赖。")
             return messagebox.askyesno(
-                "需要配置环境",
-                f"{detail}\n\n程序将自动联网安装或更新运行环境。\n确定继续吗？",
+                "需要配置内置环境",
+                f"{detail}\n\n程序将自动联网安装或更新软件内置 runtime。\n确定继续吗？",
             )
 
         if state == "missing-runtime":
@@ -3379,19 +3379,20 @@ class App:
         self._start_process(command, title="环境检查", mode_label="环境检查", preview_path=None)
 
     def start_configure_environment(self, *, auto_triggered: bool = False) -> None:
-        python_path = self._resolve_python_path(allow_missing_builtin=True)
-        if not python_path:
-            return
+        python_path = str(BUNDLED_RUNTIME_PYTHON)
+        self.python_var.set(python_path)
 
         probe = self._probe_environment_state(python_path)
         if auto_triggered:
             if str(probe.get("state") or "") == "ready":
-                self.left_result_var.set(f"环境已可用：{python_path}")
-                self.process_status_var.set("环境已可用")
+                self.left_result_var.set(f"内置环境已可用：{python_path}")
+                self.process_status_var.set("内置环境已可用")
                 return
         elif not self._should_continue_after_probe(probe):
             return
 
+        self.left_result_var.set(f"正在配置内置环境：{python_path}")
+        self.process_status_var.set("正在配置内置环境")
         self._start_configure_process(python_path)
 
     def start_prepare_dataset(self) -> None:
@@ -3785,6 +3786,7 @@ class App:
             python_path = str(payload.get("python") or self.python_var.get())
             accelerator = str(payload.get("accelerator") or "cpu")
             torch_index = str(payload.get("torch_index") or "默认")
+            self.python_var.set(python_path)
             self.left_result_var.set(f"环境配置完成：{python_path}")
             self.process_status_var.set("环境配置完成")
             self.result_location_var.set("")
