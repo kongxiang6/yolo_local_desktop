@@ -1,16 +1,15 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+import os
 from pathlib import Path
 
 
 project_dir = Path.cwd()
 app_name = "YOLO训练工具"
+fast_build = (os.environ.get("YOLO_TOOL_BUILD_FAST", "0") == "1")
 
 datas = [
     (str(project_dir / "backend.py"), "."),
-    (str(project_dir / "README.md"), "."),
-    (str(project_dir / "USER_GUIDE.txt"), "."),
-    (str(project_dir / "requirements.txt"), "."),
     (str(project_dir / "assets" / "yolotool_icon.png"), "assets"),
     (str(project_dir / "assets" / "yolotool_icon.ico"), "assets"),
     (str(project_dir / "contracts" / "train_capabilities.json"), "contracts"),
@@ -49,7 +48,7 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=not fast_build,
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
@@ -64,7 +63,7 @@ coll = COLLECT(
     a.binaries,
     a.datas,
     strip=False,
-    upx=True,
+    upx=not fast_build,
     upx_exclude=[],
     name=app_name,
 )

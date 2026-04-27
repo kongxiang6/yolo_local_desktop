@@ -89,34 +89,47 @@ def build_export_namespace(task: str, weights: str, config: dict) -> SimpleNames
 
 
 def run_check(_: argparse.Namespace) -> int:
-    report = runtime_preflight.run_runtime_preflight()
+    system_nvidia = runtime_installer.detect_nvidia_environment()
+    accelerator, torch_index = runtime_installer.choose_torch_index(
+        str(system_nvidia.get("cuda_version") or ""),
+        str(system_nvidia.get("gpu_architecture") or ""),
+    )
+    try:
+        report = runtime_preflight.run_runtime_preflight()
+    except Exception as exc:
+        report = runtime_preflight.build_broken_runtime_report(str(exc))
+    report.update(runtime_installer.build_accelerator_summary(accelerator, system_nvidia))
+    report["accelerator"] = accelerator
+    report["torch_index"] = torch_index
+    report["system_nvidia"] = system_nvidia
     report["python"] = sys.executable
     emit("RESULT", {"kind": "check", **report})
     return 0
 
 
 def run_configure_env(args: argparse.Namespace) -> int:
-    plan = runtime_installer.build_install_plan()
+    emit_status("正在检测电脑配置和下载源")
+    diagnostic_logger = lambda message: emit("APP_DIAGNOSTIC", {"level": "info", "message": message})
+    plan = runtime_installer.build_install_plan(log=diagnostic_logger)
+    accelerator_summary = runtime_installer.build_accelerator_summary(str(plan["accelerator"]), plan.get("gpu") or {})
+    plan.update(accelerator_summary)
     emit_status(
         "已生成环境安装方案",
         python=plan["python"],
         accelerator=plan["accelerator"],
+        accelerator_label=plan["accelerator_label"],
         torch_index=plan["torch_index"],
     )
     emit("APP_DIAGNOSTIC", {"level": "info", "message": f"Python: {plan['python']} ({plan['python_version']})"})
     emit("APP_DIAGNOSTIC", {"level": "info", "message": f"Platform: {plan['platform']}"})
     gpu = plan.get("gpu") or {}
-    emit(
-        "APP_DIAGNOSTIC",
-        {
-            "level": "info",
-            "message": (
-                f"NVIDIA: {'检测到' if gpu.get('available') else '未检测到'}"
-                f"  GPU={gpu.get('gpu_name') or '无'}"
-                f"  CUDA={gpu.get('cuda_version') or '无'}"
-            ),
-        },
-    )
+    emit("APP_DIAGNOSTIC", {"level": "info", "message": f"电脑硬件检测: {plan['hardware_label']}"})
+    emit("APP_DIAGNOSTIC", {"level": "info", "message": f"计划安装方案: {plan['accelerator_label']}"})
+    installed_torch_accelerator = str(plan.get("installed_torch_accelerator") or "").strip()
+    if installed_torch_accelerator:
+        emit("APP_DIAGNOSTIC", {"level": "info", "message": f"当前已安装 Torch 类型: {installed_torch_accelerator.upper()}"})
+    if plan.get("force_torch_reinstall"):
+        emit("APP_DIAGNOSTIC", {"level": "warning", "message": "当前 Torch 类型和推荐方案不一致，将自动重装 Torch。"})
     emit("APP_DIAGNOSTIC", {"level": "info", "message": f"Torch 下载源: {plan['torch_index']}"})
     emit("APP_DIAGNOSTIC", {"level": "info", "message": f"Pip 引导策略: {plan['pip_bootstrap']}"})
     for note in plan.get("notes", []):
@@ -128,18 +141,58 @@ def run_configure_env(args: argparse.Namespace) -> int:
 
     emit_status("正在准备 pip 环境")
     bootstrap_info = runtime_installer.bootstrap_pip(
-        lambda message: emit("APP_DIAGNOSTIC", {"level": "info", "message": message})
+        diagnostic_logger
     )
     emit("APP_DIAGNOSTIC", {"level": "info", "message": f"Pip 准备完成: {bootstrap_info['message']}"})
 
     commands = list(plan.get("commands") or [])
     for index, command in enumerate(commands, start=1):
-        emit_status(f"正在执行第 {index}/{len(commands)} 步", command=subprocess.list2cmdline(command))
-        return_code = runtime_installer.stream_command(command)
-        if return_code != 0:
-            raise RuntimeError(f"环境配置失败，第 {index} 步退出码为 {return_code}。")
+        alternatives = command if command and isinstance(command[0], list) else [command]
+        last_code = 0
+        for attempt_index, attempt_command in enumerate(alternatives, start=1):
+            emit_status(
+                f"正在执行第 {index}/{len(commands)} 步（尝试 {attempt_index}/{len(alternatives)}）",
+                command=subprocess.list2cmdline(attempt_command),
+            )
+            return_code = runtime_installer.stream_command(attempt_command)
+            if return_code == 0:
+                last_code = 0
+                break
+            last_code = return_code
+            emit(
+                "APP_DIAGNOSTIC",
+                {
+                    "level": "warning",
+                    "message": f"第 {index} 步第 {attempt_index} 个下载源失败，退出码 {return_code}，准备尝试下一个源。",
+                },
+            )
+        if last_code != 0:
+            raise RuntimeError(f"环境配置失败，第 {index} 步退出码为 {last_code}。")
 
-    report = runtime_preflight.run_runtime_preflight()
+    try:
+        report = runtime_preflight.run_runtime_preflight()
+    except Exception as exc:
+        report = runtime_preflight.build_broken_runtime_report(str(exc))
+    report["system_nvidia"] = gpu
+    report.update(accelerator_summary)
+    runtime_backend = str(report.get("runtime_backend") or "cpu")
+    if runtime_backend == "nvidia-unsupported":
+        emit(
+            "APP_DIAGNOSTIC",
+            {
+                "level": "warning",
+                "message": "检测到了 NVIDIA 显卡，但当前安装的 Torch 与这张显卡不兼容；现在不会把它当成可正常使用的显卡环境。",
+            },
+        )
+    elif gpu.get("available") and runtime_backend != "nvidia":
+        emit(
+            "APP_DIAGNOSTIC",
+            {
+                "level": "warning",
+                "message": "电脑里检测到了 NVIDIA 显卡，但当前运行环境还没有真正启用显卡，本次运行会按 CPU 或降级模式处理。",
+            },
+        )
+    emit("APP_DIAGNOSTIC", {"level": "info", "message": f"当前运行结果: {report.get('runtime_backend_label')}"})
     emit(
         "RESULT",
         {

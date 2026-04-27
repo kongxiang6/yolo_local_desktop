@@ -215,22 +215,13 @@
 - 如果内置环境完整，直接使用
 - 如果内置环境缺失或损坏，自动进入在线配置流程
 
-### 点击“内置”时
-
-- 如果已经检测到完整环境：直接切换到内置环境
-- 如果没有检测到完整环境：自动触发“在线一键配置环境”
-
-### 点击“当前”时
-
-- 会先检查当前选择的解释器是不是真正的 Python
-- 不会再把主程序 `exe` 错当成解释器
-
 ### 点击“在线一键配置环境”时
 
 - 只会检查和配置软件内置 `runtime`
 - 如果内置环境已经可用，会先询问是否继续更新
 - 如果内置环境不可用或不完整，才继续安装 / 修复
 - 如果软件目录里没有 `runtime`，会先自动创建内置 Python 再继续安装依赖
+- 下载时会先测速国内镜像，优先走更快的源；如果镜像不可用，再自动回退到官方源
 
 ### 当前环境安装流程
 
@@ -242,6 +233,8 @@
 - `ultralytics`
 - `pillow`
 - `pyyaml`
+- 通用依赖镜像源与重试
+- 国内镜像优先与下载缓存复用
 
 ### 为什么这样设计
 
@@ -267,7 +260,7 @@
 ### 方式二：开发模式运行
 
 ```powershell
-cd I:\AI\yolo_local_desktop
+cd <你的项目目录>\yolo_local_desktop
 python app.py
 ```
 
@@ -457,21 +450,45 @@ yolo_local_desktop/
 ### 开发运行
 
 ```powershell
-cd I:\AI\yolo_local_desktop
+cd <你的项目目录>\yolo_local_desktop
 python app.py
 ```
 
 ### 重新打包
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File I:\AI\yolo_local_desktop\build_exe.ps1
+powershell -ExecutionPolicy Bypass -File .\build_exe.ps1
+```
+
+上面的默认命令现在是 **快速本地打包**，适合频繁改界面、改逻辑后立刻自测：
+
+- 不再默认 `--clean`
+- 不再默认做 UPX 压缩
+- 不再默认复制整套 `release/` 成品
+- 不再默认重新压缩发布包
+- 默认不往成品里打包 `runtime`
+- 如果本机项目目录里已经有 `runtime`，快速模式下仍可用目录联接做本地联调
+
+如果你要生成真正发给别人用的完整成品，再执行：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\build_exe.ps1 -Full
+```
+
+上面这条命令现在默认也会生成 **不带 `runtime` 的完整成品**。
+第一次打开后，用户直接点软件里的“在线一键配置环境”即可自动创建内置环境。
+
+如果你后面真的有特殊需求，必须打一个 **带 `runtime`** 的完整包，再额外加上：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\build_exe.ps1 -Full -IncludeRuntime
 ```
 
 ### 打包完成后重点查看
 
+- 快速本地打包产物：`dist/YOLO训练工具`
 - `release/YOLO训练工具`
-- `release/YOLO训练工具_share.zip`
-- `release/YOLO_training_tool_github_no_runtime.zip`
+- `release/YOLO_training_tool_release.zip`
 
 ---
 
@@ -479,17 +496,19 @@ powershell -ExecutionPolicy Bypass -File I:\AI\yolo_local_desktop\build_exe.ps1
 
 如果是给别人发包，建议：
 
-1. 优先发 `release/YOLO训练工具_share.zip`
+1. 优先发 `release/YOLO_training_tool_release.zip`
 2. 提醒对方先完整解压
 3. 直接运行 `YOLO训练工具.exe`
 4. 第一次先点“在线一键配置环境”
 5. 不要让对方自己去运行中间文件
 
+现在默认只保留这一个发布压缩包，而且默认**不带 `runtime`**，这样打包更快、压缩包更小，也更适合频繁更新版本。
+
 如果是上传到 GitHub 的发布页，建议优先上传：
 
-- `release/YOLO_training_tool_github_no_runtime.zip`
+- `release/YOLO_training_tool_release.zip`
 
-这个版本不会包含 `runtime` 文件夹，更适合放到 GitHub Release；用户下载后首次运行时，再通过软件里的“在线一键配置环境”自动准备环境。
+默认情况下，这个版本不会包含 `runtime` 文件夹，更适合放到 GitHub Release；用户下载后首次运行时，再通过软件里的“在线一键配置环境”自动准备环境。
 
 ---
 
@@ -568,9 +587,9 @@ powershell -ExecutionPolicy Bypass -File I:\AI\yolo_local_desktop\build_exe.ps1
 
 如果是第一次接触这个软件，建议先看：
 
-- `I:\AI\yolo_local_desktop\USER_GUIDE.txt`
-- `I:\AI\yolo_local_desktop\delivery\README_FOR_SHARE.txt`
-- `I:\AI\yolo_local_desktop\CHANGELOG.md`
+- `USER_GUIDE.txt`
+- `delivery/README_FOR_SHARE.txt`
+- `CHANGELOG.md`
 
 其中：
 

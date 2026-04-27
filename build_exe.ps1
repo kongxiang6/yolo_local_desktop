@@ -1,80 +1,192 @@
+param(
+    [switch]$Full,
+    [switch]$IncludeRuntime,
+    [string]$RuntimeSource
+)
+
 $ErrorActionPreference = 'Stop'
 
 $project = Split-Path -Parent $MyInvocation.MyCommand.Path
 $buildDir = Join-Path $project 'build'
+$distRootParent = Join-Path $project 'dist'
 $releaseRoot = Join-Path $project 'release'
 $deliveryDir = Join-Path $project 'delivery'
-$githubStageRoot = Join-Path $releaseRoot 'github_release_tmp'
-$runtimeSource = Get-ChildItem -LiteralPath 'I:\rj\QQ' -Directory -Recurse -ErrorAction SilentlyContinue |
-    Where-Object { $_.Name -eq 'runtime' -and (Test-Path -LiteralPath (Join-Path $_.FullName 'python\python.exe')) } |
-    Select-Object -First 1 -ExpandProperty FullName
+$runtimeCacheFile = Join-Path $project '.runtime_source_path.txt'
+$distRoot = $null
+$appName = $null
+$releaseDir = $null
+$releaseZipPath = Join-Path $releaseRoot 'YOLO_training_tool_release.zip'
+
+function Test-RuntimeDirectory {
+    param([string]$PathValue)
+    if (-not $PathValue) {
+        return $false
+    }
+    return (Test-Path -LiteralPath (Join-Path $PathValue 'python\python.exe'))
+}
+
+function Resolve-RuntimeSource {
+    param([string]$PreferredPath)
+
+    $candidates = @()
+    if ($PreferredPath) {
+        $candidates += $PreferredPath
+    }
+    if ($env:YOLO_TOOL_RUNTIME_SOURCE) {
+        $candidates += $env:YOLO_TOOL_RUNTIME_SOURCE
+    }
+    if (Test-Path -LiteralPath $runtimeCacheFile) {
+        $cachedPath = (Get-Content -LiteralPath $runtimeCacheFile -ErrorAction SilentlyContinue | Select-Object -First 1).Trim()
+        if ($cachedPath) {
+            $candidates += $cachedPath
+        }
+    }
+    if ($releaseDir) {
+        $candidates += (Join-Path $releaseDir 'runtime')
+    }
+    $candidates += (Join-Path $project 'runtime')
+
+    foreach ($candidate in $candidates) {
+        if (Test-RuntimeDirectory $candidate) {
+            Set-Content -LiteralPath $runtimeCacheFile -Value $candidate -Encoding UTF8
+            return $candidate
+        }
+    }
+    return $null
+}
+
+function Ensure-ParentDirectory {
+    param([string]$TargetPath)
+    $parent = Split-Path -Parent $TargetPath
+    if ($parent -and -not (Test-Path -LiteralPath $parent)) {
+        New-Item -ItemType Directory -Force -Path $parent | Out-Null
+    }
+}
+
 Set-Location $project
 
-python -m PyInstaller .\yolo_local_desktop.spec --noconfirm --clean
+$runtimeSourceResolved = $null
+if ($IncludeRuntime) {
+    $runtimeSourceResolved = Resolve-RuntimeSource -PreferredPath $RuntimeSource
+    if (-not $runtimeSourceResolved) {
+        throw 'Bundled runtime source was not found. Use -RuntimeSource to specify a valid runtime directory.'
+    }
+}
 
-$distRoot = Get-ChildItem -LiteralPath (Join-Path $project 'dist') -Directory |
+$pyInstallerArgs = @('.\yolo_local_desktop.spec', '--noconfirm')
+if ($Full) {
+    $pyInstallerArgs += '--clean'
+    $env:YOLO_TOOL_BUILD_FAST = '0'
+}
+else {
+    $env:YOLO_TOOL_BUILD_FAST = '1'
+}
+
+python -m PyInstaller @pyInstallerArgs
+
+$distRoot = Get-ChildItem -LiteralPath $distRootParent -Directory -ErrorAction SilentlyContinue |
     Sort-Object LastWriteTime -Descending |
     Select-Object -First 1 -ExpandProperty FullName
-if (-not $distRoot) {
-    throw 'PyInstaller did not produce a dist directory.'
+if (-not $distRoot -or -not (Test-Path -LiteralPath $distRoot)) {
+    throw 'PyInstaller did not produce the expected dist directory.'
 }
+$appName = Split-Path -Leaf $distRoot
+$releaseDir = Join-Path $releaseRoot $appName
+
 New-Item -ItemType Directory -Force -Path (Join-Path $distRoot 'presets\train') | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $distRoot 'presets\val') | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $distRoot 'presets\predict') | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $distRoot 'presets\track') | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $distRoot 'presets\export') | Out-Null
-if ($runtimeSource -and (Test-Path -LiteralPath $runtimeSource)) {
-    Copy-Item -LiteralPath $runtimeSource -Destination (Join-Path $distRoot 'runtime') -Recurse -Force
+
+$distRuntime = Join-Path $distRoot 'runtime'
+if (Test-Path -LiteralPath $distRuntime) {
+    Remove-Item -LiteralPath $distRuntime -Recurse -Force
 }
-if (-not (Test-Path -LiteralPath (Join-Path $distRoot 'runtime\python\python.exe'))) {
-    throw 'Bundled runtime copy failed. Please ensure the original runtime folder is available.'
+if ($IncludeRuntime) {
+    if ($Full) {
+        Copy-Item -LiteralPath $runtimeSourceResolved -Destination $distRuntime -Recurse -Force
+    }
+    else {
+        New-Item -ItemType Junction -Path $distRuntime -Target $runtimeSourceResolved | Out-Null
+    }
 }
+elseif (-not $Full) {
+    $projectRuntime = Join-Path $project 'runtime'
+    if (Test-RuntimeDirectory $projectRuntime) {
+        $runtimeSourceResolved = $projectRuntime
+    }
+    elseif ($RuntimeSource) {
+        $runtimeSourceResolved = Resolve-RuntimeSource -PreferredPath $RuntimeSource
+    }
+    if ($runtimeSourceResolved) {
+        if (Test-Path -LiteralPath $distRuntime) {
+            Remove-Item -LiteralPath $distRuntime -Recurse -Force
+        }
+        New-Item -ItemType Junction -Path $distRuntime -Target $runtimeSourceResolved | Out-Null
+    }
+}
+if ($IncludeRuntime -and -not (Test-Path -LiteralPath (Join-Path $distRuntime 'python\python.exe'))) {
+    throw 'Bundled runtime setup failed.'
+}
+
 if (Test-Path -LiteralPath (Join-Path $deliveryDir 'README_FOR_SHARE.txt')) {
     Copy-Item -LiteralPath (Join-Path $deliveryDir 'README_FOR_SHARE.txt') -Destination (Join-Path $distRoot 'README_FOR_SHARE.txt') -Force
 }
 $localGuide = Join-Path $project 'USER_GUIDE.txt'
-if ($localGuide -and (Test-Path -LiteralPath $localGuide)) {
+if (Test-Path -LiteralPath $localGuide) {
     Copy-Item -LiteralPath $localGuide -Destination (Join-Path $distRoot (Split-Path $localGuide -Leaf)) -Force
 }
-
-New-Item -ItemType Directory -Force -Path $releaseRoot | Out-Null
-$releaseDir = Join-Path $releaseRoot (Split-Path $distRoot -Leaf)
-if (Test-Path -LiteralPath $releaseDir) {
-    Remove-Item -LiteralPath $releaseDir -Recurse -Force
-}
-Copy-Item -LiteralPath $distRoot -Destination $releaseDir -Recurse -Force
-
-$buildExe = Get-ChildItem -LiteralPath (Join-Path $buildDir 'yolo_local_desktop') -Filter '*.exe' -ErrorAction SilentlyContinue |
-    Select-Object -First 1 -ExpandProperty FullName
-if ($buildExe) {
-    Remove-Item -LiteralPath $buildExe -Force
+$licenseFile = Join-Path $project 'LICENSE'
+if (Test-Path -LiteralPath $licenseFile) {
+    Copy-Item -LiteralPath $licenseFile -Destination (Join-Path $distRoot 'LICENSE') -Force
 }
 
-$zipPath = Join-Path $releaseRoot ((Split-Path $releaseDir -Leaf) + '_share.zip')
-if (Test-Path -LiteralPath $zipPath) {
-    Remove-Item -LiteralPath $zipPath -Force
-}
-Compress-Archive -Path $releaseDir -DestinationPath $zipPath
+if ($Full) {
+    New-Item -ItemType Directory -Force -Path $releaseRoot | Out-Null
+    Get-ChildItem -LiteralPath $releaseRoot -Force -ErrorAction SilentlyContinue |
+        Where-Object {
+            (
+                $_.PSIsContainer -and $_.Name -like 'YOLO*' -and $_.Name -ne $appName
+            ) -or (
+                -not $_.PSIsContainer -and (
+                    $_.Name -like 'YOLO*_share.zip' -or
+                    $_.Name -like 'YOLO*_github_no_runtime.zip' -or
+                    $_.Name -like 'YOLO*_release.zip'
+                ) -and $_.Name -ne (Split-Path -Leaf $releaseZipPath)
+            )
+        } |
+        Remove-Item -Recurse -Force
+    if (Test-Path -LiteralPath $releaseDir) {
+        Remove-Item -LiteralPath $releaseDir -Recurse -Force
+    }
+    Copy-Item -LiteralPath $distRoot -Destination $releaseDir -Recurse -Force
 
-$githubZipPath = Join-Path $releaseRoot 'YOLO_training_tool_github_no_runtime.zip'
-$githubStage = Join-Path $githubStageRoot (Split-Path $releaseDir -Leaf)
-if (Test-Path -LiteralPath $githubStageRoot) {
-    Remove-Item -LiteralPath $githubStageRoot -Recurse -Force
-}
-if (Test-Path -LiteralPath $githubZipPath) {
-    Remove-Item -LiteralPath $githubZipPath -Force
-}
-New-Item -ItemType Directory -Force -Path $githubStageRoot | Out-Null
-Copy-Item -LiteralPath $releaseDir -Destination $githubStage -Recurse -Force
-if (Test-Path -LiteralPath (Join-Path $githubStage 'runtime')) {
-    Remove-Item -LiteralPath (Join-Path $githubStage 'runtime') -Recurse -Force
-}
-Compress-Archive -Path $githubStage -DestinationPath $githubZipPath
-if (Test-Path -LiteralPath $githubStageRoot) {
-    Remove-Item -LiteralPath $githubStageRoot -Recurse -Force
+    $buildExe = Get-ChildItem -LiteralPath (Join-Path $buildDir 'yolo_local_desktop') -Filter '*.exe' -ErrorAction SilentlyContinue |
+        Select-Object -First 1 -ExpandProperty FullName
+    if ($buildExe) {
+        Remove-Item -LiteralPath $buildExe -Force
+    }
+
+    if (Test-Path -LiteralPath $releaseZipPath) {
+        Remove-Item -LiteralPath $releaseZipPath -Force
+    }
+    Compress-Archive -Path $releaseDir -DestinationPath $releaseZipPath
 }
 
-Write-Host "Build finished: $distRoot"
-Write-Host "Release ready: $releaseDir"
-Write-Host "Zip ready: $zipPath"
-Write-Host "GitHub zip ready: $githubZipPath"
+Write-Host "Build mode: $(if ($Full) { 'full release' } else { 'fast local' })"
+Write-Host "Include runtime: $IncludeRuntime"
+if ($runtimeSourceResolved) {
+    Write-Host "Runtime source: $runtimeSourceResolved"
+}
+else {
+    Write-Host "Runtime source: <not bundled>"
+}
+Write-Host "Dist ready: $distRoot"
+if ($Full) {
+    Write-Host "Release ready: $releaseDir"
+    Write-Host "Zip ready: $releaseZipPath"
+}
+else {
+    Write-Host "Fast build skips release copy and zip compression. Use -Full when you need a share/release package."
+}

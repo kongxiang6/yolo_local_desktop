@@ -6,6 +6,7 @@ build/
 dist/
 release/
 logs/
+.runtime_source_path.txt
 
 runtime/
 .venv/
@@ -15,4 +16,4 @@ presets/**/*.json
 presets/**/selftest_*.json
 
 designs/__pycache__/
-
+_local/

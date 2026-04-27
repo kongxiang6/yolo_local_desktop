@@ -13,6 +13,7 @@ import threading
 import tkinter as tk
 import urllib.request
 import zipfile
+from datetime import datetime
 from urllib.parse import quote, unquote
 from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
@@ -33,6 +34,9 @@ TEXT_MUTED = "#6c7c96"
 SUCCESS = "#31c48d"
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 NO_WINDOW_FLAGS = CREATE_NO_WINDOW if os.name == "nt" else 0
+LOG_POLL_ACTIVE_MS = 40
+LOG_QUEUE_ITEMS_PER_TICK = 240
+LOG_VISIBLE_LINE_LIMIT = 2000
 
 PARAMETER_HINTS: dict[str, str] = {
     "epochs": "训练多少轮。数值越大，训练越久；新手一般先从 50 或 100 开始。",
@@ -583,6 +587,8 @@ def parse_scalar(text: str, allowed_types: list[str]) -> object:
 
 
 class ToolTip:
+    _open_instances: set["ToolTip"] = set()
+
     def __init__(self, widget: tk.Widget, text: str) -> None:
         self.widget = widget
         self.text = text.strip()
@@ -592,6 +598,7 @@ class ToolTip:
         self.widget.bind("<Enter>", self._show, add="+")
         self.widget.bind("<Leave>", self._hide, add="+")
         self.widget.bind("<ButtonPress>", self._hide, add="+")
+        self.widget.bind("<Destroy>", self._hide, add="+")
 
     def _show(self, _: tk.Event | None = None) -> None:
         if self.window is not None or not self.text:
@@ -617,11 +624,18 @@ class ToolTip:
             highlightbackground=BORDER,
         )
         label.pack()
+        ToolTip._open_instances.add(self)
 
     def _hide(self, _: tk.Event | None = None) -> None:
         if self.window is not None:
             self.window.destroy()
             self.window = None
+        ToolTip._open_instances.discard(self)
+
+    @classmethod
+    def hide_all(cls) -> None:
+        for instance in list(cls._open_instances):
+            instance._hide()
 
 
 class SmartComboBox(tk.Frame):
@@ -759,11 +773,14 @@ class SmartComboBox(tk.Frame):
         listbox.bind("<Double-Button-1>", self._confirm_selection, add="+")
         listbox.bind("<Return>", self._confirm_selection, add="+")
         listbox.bind("<Escape>", lambda _e: self.close_popup(), add="+")
-        for widget in (popup, listbox):
+        for widget in (popup,):
             widget.bind("<MouseWheel>", self._forward_mousewheel, add="+")
             widget.bind("<Button-4>", self._forward_mousewheel, add="+")
             widget.bind("<Button-5>", self._forward_mousewheel, add="+")
-        popup.bind("<FocusOut>", lambda _e: self.after(50, self.close_popup), add="+")
+        for widget in (listbox,):
+            widget.bind("<MouseWheel>", self._scroll_popup_listbox, add="+")
+            widget.bind("<Button-4>", self._scroll_popup_listbox, add="+")
+            widget.bind("<Button-5>", self._scroll_popup_listbox, add="+")
         self.reposition_popup()
         listbox.focus_set()
         SmartComboBox._open_instances.add(self)
@@ -791,9 +808,26 @@ class SmartComboBox(tk.Frame):
         scrollable = self._find_scrollable_parent()
         if scrollable is None:
             return None
-        self.close_popup()
-        ScrollableFrame._active_instance = scrollable
         return scrollable._on_mousewheel(event)
+
+    def _scroll_popup_listbox(self, event: tk.Event) -> str | None:
+        if self.listbox is None:
+            return "break"
+        visible_rows = int(self.listbox.cget("height") or 0)
+        if self.listbox.size() <= visible_rows:
+            return self._forward_mousewheel(event)
+
+        delta = 0
+        if getattr(event, "delta", 0):
+            delta = -1 if event.delta > 0 else 1
+        elif getattr(event, "num", None) == 4:
+            delta = -1
+        elif getattr(event, "num", None) == 5:
+            delta = 1
+        if not delta:
+            return "break"
+        self.listbox.yview_scroll(delta, "units")
+        return "break"
 
     def reposition_popup(self) -> None:
         if self.popup is None:
@@ -867,6 +901,15 @@ class ScrollableFrame(tk.Frame):
             widget.bind("<Leave>", self._unbind_mousewheel, add="+")
         self._ensure_global_mousewheel_binding()
 
+    @classmethod
+    def _resolve_from_widget(cls, widget: tk.Widget | None) -> "ScrollableFrame | None":
+        current = widget
+        while current is not None:
+            if isinstance(current, cls):
+                return current
+            current = getattr(current, "master", None)
+        return None
+
     def _ensure_global_mousewheel_binding(self) -> None:
         root = self.winfo_toplevel()
         bound_root = ScrollableFrame._bound_root
@@ -886,19 +929,20 @@ class ScrollableFrame(tk.Frame):
 
     @classmethod
     def _dispatch_mousewheel(cls, event: tk.Event) -> str | None:
-        instance = cls._active_instance
+        instance = cls._resolve_from_widget(getattr(event, "widget", None))
+        if instance is None:
+            instance = cls._active_instance
         if instance is None:
             return None
-        result = instance._on_mousewheel(event)
-        SmartComboBox.close_all()
-        return result
+        return instance._on_mousewheel(event)
 
     def _on_canvas_scroll(self, first: str, last: str) -> None:
         self.scrollbar.set(first, last)
-        SmartComboBox.close_all()
+        ToolTip.hide_all()
+        SmartComboBox.reposition_all()
 
     def _scroll_canvas(self, *args: object) -> None:
-        SmartComboBox.close_all()
+        ToolTip.hide_all()
         self.canvas.yview(*args)
 
     def _bind_mousewheel(self, _: tk.Event | None = None) -> None:
@@ -915,11 +959,13 @@ class ScrollableFrame(tk.Frame):
 
     def _sync_scrollregion(self, _: tk.Event) -> None:
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
-        SmartComboBox.close_all()
+        ToolTip.hide_all()
+        SmartComboBox.reposition_all()
 
     def _sync_width(self, event: tk.Event) -> None:
         self.canvas.itemconfigure(self.window_id, width=event.width)
-        SmartComboBox.close_all()
+        ToolTip.hide_all()
+        SmartComboBox.reposition_all()
 
     def _on_mousewheel(self, event: tk.Event) -> str | None:
         if ScrollableFrame._active_instance not in {None, self}:
@@ -935,7 +981,7 @@ class ScrollableFrame(tk.Frame):
             delta = 1
         if delta:
             self.canvas.yview_scroll(delta, "units")
-            SmartComboBox.close_all()
+            ToolTip.hide_all()
             return "break"
         return None
 
@@ -1025,6 +1071,8 @@ class App:
         self.process: subprocess.Popen[str] | None = None
         self.log_queue: queue.Queue[tuple[str, object]] = queue.Queue()
         self._log_after_id: str | None = None
+        self._visible_log_lines = 0
+        self._log_sequence = 0
         self.temp_files: list[Path] = []
         self.current_log_path: Path | None = None
         self.current_log_handle: object | None = None
@@ -1033,7 +1081,7 @@ class App:
         self.active_tab = tk.StringVar(value="train")
         self.train_action_var = tk.StringVar(value="train")
 
-        self.python_var = tk.StringVar(value=recommended_python_path())
+        self.python_var = tk.StringVar(value=str(BUNDLED_RUNTIME_PYTHON) if is_frozen_app() else sys.executable)
 
         self.process_status_var = tk.StringVar(value="等待开始")
         self.left_log_state_var = tk.StringVar(value="暂无")
@@ -1144,7 +1192,6 @@ class App:
         self._refresh_run_action_buttons()
         self._refresh_status_visuals()
 
-        self._log_after_id = self.root.after(100, self._drain_logs)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _configure_styles(self) -> None:
@@ -1367,7 +1414,7 @@ class App:
 
         self.train_sections: dict[str, AccordionSection] = {}
 
-        self.train_sections["env"] = self._create_section(parent, row, "运行环境", False)
+        self.train_sections["env"] = self._create_section(parent, row, "运行环境", True)
         self.train_section_modes["env"] = {"train", "val", "predict", "track"}
         self._build_env_section(self.train_sections["env"].body, scope="train")
         row += 1
@@ -1433,7 +1480,7 @@ class App:
 
         self.export_sections: dict[str, AccordionSection] = {}
 
-        self.export_sections["env"] = self._create_section(parent, row, "运行环境", False)
+        self.export_sections["env"] = self._create_section(parent, row, "运行环境", True)
         self._build_env_section(self.export_sections["env"].body, scope="export")
         row += 1
 
@@ -1533,26 +1580,7 @@ class App:
         return entry
 
     def _build_env_section(self, parent: tk.Widget, *, scope: str) -> None:
-        grid = tk.Frame(parent, bg=PANEL_BG)
-        grid.pack(fill="x", padx=10, pady=10)
-        grid.grid_columnconfigure(1, weight=1)
-
-        path_row = tk.Frame(grid, bg=PANEL_BG)
-        path_row.grid_columnconfigure(0, weight=1)
-        python_entry = self._create_entry(path_row, self.python_var, readonly=False)
-        python_entry.grid(row=0, column=0, sticky="ew")
-        self._create_small_button(path_row, "浏览", self._pick_python).grid(row=0, column=1, padx=(8, 0))
-        self._create_small_button(path_row, "内置", self._use_default_runtime).grid(row=0, column=2, padx=(8, 0))
-        self._create_small_button(path_row, "当前", self._use_current_python).grid(row=0, column=3, padx=(8, 0))
-        self._create_form_row(
-            grid,
-            row=0,
-            label="Python 路径",
-            widget=path_row,
-            description="这里决定实际调用哪个 Python 环境。优先建议使用内置 runtime；“在线一键配置环境”始终只会检查并配置软件内置 runtime。",
-        )
-
-        check_text = "检查当前环境" if scope == "train" else "检查并确认导出环境"
+        check_text = "检查当前环境"
         install_button = tk.Button(
             parent,
             text="在线一键配置环境（自动识别 CPU / NVIDIA）",
@@ -1571,6 +1599,10 @@ class App:
             cursor="hand2",
         )
         install_button.pack(fill="x", padx=14, pady=(0, 8))
+        ToolTip(
+            install_button,
+            "只会检查并配置软件内置 runtime。缺少内置环境时会自动在线创建，不会往别的路径里安装环境。",
+        )
 
         check_button = tk.Button(
             parent,
@@ -1590,17 +1622,7 @@ class App:
             cursor="hand2",
         )
         check_button.pack(fill="x", padx=14, pady=(0, 8))
-
-        note = tk.Label(
-            parent,
-            text="一键配置只会检查并配置软件内置 runtime：如果内置环境已可用，会先询问你是否还要更新；如果内置 runtime 缺失，会自动在线创建；随后再识别当前电脑是 CPU 还是 NVIDIA 环境，并按推荐方案安装 pip、torch、ultralytics、pillow、pyyaml。环境检查会验证 ultralytics、torch、yaml 是否可用，并把实际解释器路径与关键版本打印到左侧日志。",
-            bg=PANEL_BG,
-            fg=TEXT_MUTED,
-            wraplength=430,
-            justify="left",
-            font=("Microsoft YaHei UI", 10),
-        )
-        note.pack(fill="x", padx=14, pady=(0, 12))
+        ToolTip(check_button, "检查的是软件当前内置 runtime 是否完整可用，并把版本信息输出到左侧日志。")
 
     def _build_train_entry_section(self, parent: tk.Widget) -> None:
         grid = tk.Frame(parent, bg=PANEL_BG)
@@ -2409,6 +2431,7 @@ class App:
         self.export_preset_var.trace_add("write", lambda *_: self._refresh_run_action_buttons())
 
     def _show_tab(self, tab: str) -> None:
+        ToolTip.hide_all()
         SmartComboBox.close_all()
         self.active_tab.set(tab)
         if tab == "train":
@@ -2428,6 +2451,7 @@ class App:
         self._refresh_summary()
 
     def _show_train_action(self, action: str) -> None:
+        ToolTip.hide_all()
         SmartComboBox.close_all()
         self.train_action_var.set(action)
         self.selected_train_action_label_var.set(ACTION_ID_TO_LABEL[action])
@@ -2661,8 +2685,10 @@ class App:
         }
         self._clear_log_text()
         self.log_text.configure(state="normal")
-        self.log_text.insert("1.0", text_map.get(mode, text_map["train"]))
+        placeholder = text_map.get(mode, text_map["train"])
+        self.log_text.insert("1.0", placeholder)
         self.log_text.configure(state="disabled")
+        self._visible_log_lines = len(placeholder.splitlines())
 
     def _collect_field_payload(self, fields: dict[str, dict[str, Any]]) -> dict[str, object]:
         payload: dict[str, object] = {}
@@ -2781,42 +2807,153 @@ class App:
             return False
 
     def _resolve_python_path(self, *, allow_missing_builtin: bool = False) -> str | None:
-        python_path = self.python_var.get().strip()
-        if not python_path:
-            recommended = recommended_python_path()
-            if recommended:
-                self.python_var.set(recommended)
-                python_path = recommended
-
-        if not python_path:
-            messagebox.showwarning("缺少 Python", "请先选择要调用的 Python 解释器。")
-            return None
-
-        if is_app_launcher_path(python_path):
+        if is_frozen_app():
+            python_path = str(BUNDLED_RUNTIME_PYTHON)
+            self.python_var.set(python_path)
+            if BUNDLED_RUNTIME_PYTHON.exists():
+                return python_path
+            if allow_missing_builtin:
+                return python_path
             messagebox.showwarning(
-                "Python 选择无效",
-                "当前选择的是软件主程序本身，不是 Python 解释器。\n"
-                "请改用“内置”或“当前”，或者点击“在线一键配置环境”自动创建内置 runtime。",
+                "内置环境不存在",
+                "当前还没有可用的内置 runtime。\n\n请先点击“在线一键配置环境”自动创建并配置软件内置环境。",
             )
             return None
 
+        python_path = self.python_var.get().strip() or sys.executable
+        self.python_var.set(python_path)
+        if is_app_launcher_path(python_path):
+            messagebox.showwarning("Python 选择无效", "当前选择的是软件主程序本身，不是 Python 解释器。")
+            return None
         if not is_python_interpreter_path(python_path):
             messagebox.showwarning("Python 选择无效", f"所选文件不是 python.exe：\n{python_path}")
             return None
-
         path_obj = Path(python_path).expanduser()
         if path_obj.exists():
             return str(path_obj)
-
-        if allow_missing_builtin and self._is_builtin_runtime_target(python_path):
-            return str(BUNDLED_RUNTIME_PYTHON)
-
-        messagebox.showwarning(
-            "Python 不存在",
-            f"找不到解释器：\n{python_path}\n\n"
-            "如果这是内置 runtime，请点击“在线一键配置环境”自动重新创建。",
-        )
+        messagebox.showwarning("Python 不存在", f"找不到解释器：\n{python_path}")
         return None
+
+    def _system_environment_label(self, payload: dict[str, Any]) -> str:
+        gpu = payload.get("system_nvidia") or payload.get("gpu") or {}
+        if not isinstance(gpu, dict):
+            gpu = {}
+        if gpu.get("available"):
+            gpu_name = str(gpu.get("gpu_name") or "NVIDIA 显卡").strip()
+            gpu_architecture = str(gpu.get("gpu_architecture") or "").strip()
+            cuda_version = str(gpu.get("cuda_version") or "").strip()
+            driver_version = str(gpu.get("driver_version") or "").strip()
+            details: list[str] = [gpu_name]
+            if gpu_architecture:
+                details.append(gpu_architecture)
+            if cuda_version:
+                details.append(f"CUDA {cuda_version}")
+            if driver_version:
+                details.append(f"驱动 {driver_version}")
+            return "NVIDIA 显卡（" + "，".join(details) + "）"
+        return "CPU（未检测到可用 NVIDIA 显卡）"
+
+    def _runtime_environment_label(self, payload: dict[str, Any]) -> str:
+        explicit = str(payload.get("runtime_backend_label") or "").strip()
+        if explicit:
+            return explicit
+
+        runtime_backend = str(payload.get("runtime_backend") or "").strip().lower()
+        torch_device_name = str(payload.get("torch_device_name") or "").strip()
+        torch_cuda_version = str(payload.get("torch_cuda_version") or "").strip()
+        torch_device_capability = str(payload.get("torch_device_capability") or "").strip()
+        if runtime_backend == "nvidia":
+            return f"当前运行环境已启用 NVIDIA 显卡：{torch_device_name or '未知型号'}"
+        if runtime_backend == "nvidia-unsupported":
+            capability_text = f"（算力 {torch_device_capability}）" if torch_device_capability else ""
+            return f"检测到 NVIDIA 显卡：{torch_device_name or '未知型号'}{capability_text}，但当前 Torch 与这张显卡不兼容"
+        if runtime_backend == "cuda-build-no-device":
+            return f"已安装显卡版 Torch（CUDA {torch_cuda_version or '未知'}），但当前没有真正启用 NVIDIA 显卡"
+        if runtime_backend == "broken":
+            return "当前运行环境不完整，需要重新配置环境"
+        return "当前运行环境使用 CPU"
+
+    def _runtime_environment_brief(self, payload: dict[str, Any]) -> str:
+        runtime_backend = str(payload.get("runtime_backend") or "").strip().lower()
+        torch_device_name = str(payload.get("torch_device_name") or "").strip()
+        torch_cuda_version = str(payload.get("torch_cuda_version") or "").strip()
+        torch_device_capability = str(payload.get("torch_device_capability") or "").strip()
+        if runtime_backend == "nvidia":
+            return f"NVIDIA 显卡可用（{torch_device_name or '已启用'}）"
+        if runtime_backend == "nvidia-unsupported":
+            capability_text = f"，算力 {torch_device_capability}" if torch_device_capability else ""
+            return f"检测到 NVIDIA，但当前 Torch 不兼容（{torch_device_name or '未知型号'}{capability_text}）"
+        if runtime_backend == "cuda-build-no-device":
+            return f"显卡版 Torch 已装，但当前未启用显卡（CUDA {torch_cuda_version or '未知'}）"
+        if runtime_backend == "broken":
+            return "环境损坏，需要重配"
+        return "CPU 模式"
+
+    def _install_plan_label(self, payload: dict[str, Any]) -> str:
+        explicit = str(payload.get("accelerator_label") or "").strip()
+        if explicit:
+            return explicit
+        accelerator = str(payload.get("accelerator") or "cpu").strip().lower()
+        return f"NVIDIA 显卡版（{accelerator.upper()}）" if accelerator and accelerator != "cpu" else "CPU 版"
+
+    def _recommended_accelerator(self, payload: dict[str, Any]) -> str:
+        accelerator = str(payload.get("accelerator") or "").strip().lower()
+        if accelerator:
+            return accelerator
+        accelerator_label = str(payload.get("accelerator_label") or "").strip().lower()
+        if "cpu" in accelerator_label:
+            return "cpu"
+        for token in accelerator_label.replace("（", " ").replace("）", " ").split():
+            if token.startswith("cu") and token[2:].isdigit():
+                return token
+        return "cpu"
+
+    def _runtime_needs_configuration(self, payload: dict[str, Any]) -> bool:
+        if str(payload.get("preflight_error") or "").strip():
+            return True
+        if str(payload.get("site_packages_error") or "").strip():
+            return True
+        runtime_backend = str(payload.get("runtime_backend") or "").strip().lower()
+        if runtime_backend == "nvidia-unsupported":
+            return True
+        if runtime_backend == "broken":
+            return True
+        recommended_accelerator = self._recommended_accelerator(payload)
+        if recommended_accelerator == "cpu":
+            return False
+        return runtime_backend != "nvidia"
+
+    def _environment_dialog_message(self, payload: dict[str, Any], *, include_plan: bool = False) -> str:
+        python_path = str(payload.get("python") or self.python_var.get()).strip()
+        parts = [f"Python：{python_path}", f"电脑硬件：{self._system_environment_label(payload)}"]
+        if include_plan:
+            parts.append(f"安装计划：{self._install_plan_label(payload)}")
+        parts.append(f"当前环境：{self._runtime_environment_label(payload)}")
+
+        torch_version = str(payload.get("torch_version") or "").strip()
+        if torch_version:
+            parts.append(f"Torch 版本：{torch_version}")
+        torch_build_label = str(payload.get("torch_build_label") or "").strip()
+        if torch_build_label:
+            parts.append(f"Torch 类型：{torch_build_label}")
+        torch_device_capability = str(payload.get("torch_device_capability") or "").strip()
+        if torch_device_capability:
+            parts.append(f"显卡算力：{torch_device_capability}")
+        torch_device_count = payload.get("torch_device_count")
+        if torch_device_count not in (None, ""):
+            parts.append(f"可用显卡数量：{torch_device_count}")
+        torch_cuda_warnings = payload.get("torch_cuda_warnings") or []
+        if isinstance(torch_cuda_warnings, list) and torch_cuda_warnings:
+            first_warning = str(torch_cuda_warnings[0]).strip()
+            if first_warning:
+                parts.append(f"兼容性提醒：{first_warning.splitlines()[0]}")
+        preflight_error = str(payload.get("preflight_error") or payload.get("site_packages_error") or "").strip()
+        if preflight_error:
+            parts.append(f"环境异常：{preflight_error}")
+        return "\n".join(parts)
+
+    def _environment_dialog_needs_warning(self, payload: dict[str, Any]) -> bool:
+        return self._runtime_needs_configuration(payload)
 
     def _run_quiet_backend_command(self, command: list[str]) -> tuple[int, list[str]]:
         env = os.environ.copy()
@@ -2871,9 +3008,17 @@ class App:
                 error_message = str(payload.get("message") or "")
 
         if return_code == 0 and result_payload:
+            if self._runtime_needs_configuration(result_payload):
+                return {
+                    "state": "needs-configure",
+                    "message": self._runtime_environment_label(result_payload),
+                    "python": str(result_payload.get("python") or python_path),
+                    "torch_version": str(result_payload.get("torch_version") or ""),
+                    "payload": result_payload,
+                }
             return {
                 "state": "ready",
-                "message": "当前环境已可直接使用。",
+                "message": "内置环境已可直接使用。",
                 "python": str(result_payload.get("python") or python_path),
                 "torch_version": str(result_payload.get("torch_version") or ""),
                 "payload": result_payload,
@@ -2881,7 +3026,7 @@ class App:
 
         return {
             "state": "needs-configure",
-            "message": error_message or "当前环境不完整，需要安装或更新依赖。",
+            "message": error_message or "内置环境不完整，需要安装或更新依赖。",
             "python": python_path,
             "returncode": return_code,
             "lines": lines[-12:],
@@ -2892,9 +3037,9 @@ class App:
         if state == "ready":
             python_path = str(probe.get("python") or self.python_var.get())
             torch_version = str(probe.get("torch_version") or "")
-            message = f"已检测到内置环境可直接使用：\nPython：{python_path}"
-            if torch_version:
-                message += f"\nTorch：{torch_version}"
+            payload = probe.get("payload") if isinstance(probe.get("payload"), dict) else {}
+            merged_payload = {"python": python_path, "torch_version": torch_version, **payload}
+            message = "已检测到内置环境可直接使用：\n" + self._environment_dialog_message(merged_payload)
             message += "\n\n如果继续，程序会联网检查并更新内置 runtime 的依赖。\n要继续更新吗？"
             return messagebox.askyesno("内置环境已可用", message)
 
@@ -3203,7 +3348,7 @@ class App:
         name_var = self.train_preset_var if context == "train" else self.export_preset_var
         preset_name = name_var.get().strip()
         if not preset_name:
-            messagebox.showinfo("璇疯緭鍏ュ悕绉?", "璇峰厛鍦ㄢ€滃弬鏁伴璁锯€濋噷杈撳叆鑷畾涔夊悕绉帮紝鍐嶇偣鍑讳繚瀛樸€?")
+            messagebox.showinfo("请输入名称", "请先在“参数预设”里输入自定义名称，再点击保存。")
             return
         if self._is_builtin_preset(scope, preset_name):
             messagebox.showwarning("名称占用", "这个名称已被内置推荐预设使用，请换一个名称。")
@@ -3375,6 +3520,8 @@ class App:
         python_path = self._ensure_python()
         if not python_path:
             return
+        self.left_result_var.set(f"正在检查内置环境：{python_path}")
+        self.process_status_var.set("正在检查内置环境")
         command = [python_path, "-u", str(BACKEND), "check"]
         self._start_process(command, title="环境检查", mode_label="环境检查", preview_path=None)
 
@@ -3618,7 +3765,7 @@ class App:
 
         self._close_log_handle()
         self.current_log_path = self._create_log_path(title)
-        self.current_log_handle = self.current_log_path.open("w", encoding="utf-8")
+        self.current_log_handle = self.current_log_path.open("w", encoding="utf-8", buffering=1)
         self.last_result_path = preview_path if preview_path and preview_path.exists() else None
         self.process_status_var.set("任务已启动")
         self.left_log_state_var.set("运行中")
@@ -3655,12 +3802,15 @@ class App:
             return
 
         threading.Thread(target=self._pump_stdout, daemon=True).start()
+        self._schedule_log_drain(LOG_POLL_ACTIVE_MS, reset=True)
 
     def _create_log_path(self, title: str) -> Path:
         logs_dir = WORK_DIR / "logs"
         logs_dir.mkdir(parents=True, exist_ok=True)
         safe_title = title.replace(" ", "_")
-        file_name = f"{safe_title}_{os.getpid()}_{len(self.temp_files)}.log"
+        self._log_sequence += 1
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        file_name = f"{safe_title}_{timestamp}_{self._log_sequence:03d}.log"
         return logs_dir / file_name
 
     def _pump_stdout(self) -> None:
@@ -3671,16 +3821,45 @@ class App:
             self.log_queue.put(("line", line.rstrip()))
         self.log_queue.put(("exit", process.wait()))
 
+    def _schedule_log_drain(self, delay_ms: int, *, reset: bool = False) -> None:
+        if self._log_after_id and not reset:
+            return
+        if self._log_after_id:
+            try:
+                self.root.after_cancel(self._log_after_id)
+            except tk.TclError:
+                pass
+            self._log_after_id = None
+        try:
+            if self.root.winfo_exists():
+                self._log_after_id = self.root.after(delay_ms, self._drain_logs)
+        except tk.TclError:
+            self._log_after_id = None
+
     def _drain_logs(self) -> None:
         self._log_after_id = None
-        while True:
+        pending_lines: list[str] = []
+        processed = 0
+
+        def flush_lines() -> None:
+            if not pending_lines:
+                return
+            batch = pending_lines[:]
+            pending_lines.clear()
+            self._append_log_batch(batch)
+            for line in batch:
+                self._handle_backend_line(line)
+
+        while processed < LOG_QUEUE_ITEMS_PER_TICK:
             try:
                 kind, payload = self.log_queue.get_nowait()
             except queue.Empty:
                 break
+            processed += 1
             if kind == "line":
-                self._handle_backend_line(str(payload))
+                pending_lines.append(str(payload))
             elif kind == "exit":
+                flush_lines()
                 self._append_log(f"退出码: {payload}")
                 self.process = None
                 if str(payload) == "0":
@@ -3691,14 +3870,17 @@ class App:
                     if self.process_status_var.get() not in {"任务失败", "已取消"}:
                         self.process_status_var.set("已结束")
                 self._close_log_handle()
+        flush_lines()
+
+        has_backlog = not self.log_queue.empty()
+        keep_draining = (self.process and self.process.poll() is None) or has_backlog
         try:
-            if self.root.winfo_exists():
-                self._log_after_id = self.root.after(100, self._drain_logs)
+            if keep_draining and self.root.winfo_exists():
+                self._log_after_id = self.root.after(LOG_POLL_ACTIVE_MS, self._drain_logs)
         except tk.TclError:
             self._log_after_id = None
 
     def _handle_backend_line(self, line: str) -> None:
-        self._append_log(line)
         if not line.startswith("[") or "] " not in line:
             return
         tag, payload_text = line.split("] ", 1)
@@ -3772,30 +3954,29 @@ class App:
 
         if tag == "RESULT" and payload.get("kind") == "check":
             python_path = str(payload.get("python") or self.python_var.get())
-            torch_version = str(payload.get("torch_version") or "")
-            self.left_result_var.set(f"环境正常：{python_path}")
-            self.process_status_var.set("环境检查完成")
+            self.python_var.set(python_path)
+            runtime_brief = self._runtime_environment_brief(payload)
+            self.left_result_var.set(f"内置环境正常：{runtime_brief}")
+            self.process_status_var.set("内置环境检查完成")
             self.result_location_var.set("")
-            message = f"Python：{python_path}"
-            if torch_version:
-                message += f"\nTorch：{torch_version}"
-            messagebox.showinfo("环境检查完成", message)
+            message = self._environment_dialog_message(payload)
+            dialog = messagebox.showwarning if self._environment_dialog_needs_warning(payload) else messagebox.showinfo
+            dialog("环境检查完成", message)
             return
 
         if tag == "RESULT" and payload.get("kind") == "configure-env":
             python_path = str(payload.get("python") or self.python_var.get())
-            accelerator = str(payload.get("accelerator") or "cpu")
-            torch_index = str(payload.get("torch_index") or "默认")
             self.python_var.set(python_path)
-            self.left_result_var.set(f"环境配置完成：{python_path}")
-            self.process_status_var.set("环境配置完成")
+            runtime_brief = self._runtime_environment_brief(payload)
+            self.left_result_var.set(f"内置环境配置完成：{runtime_brief}")
+            self.process_status_var.set("内置环境配置完成")
             self.result_location_var.set("")
-            messagebox.showinfo(
-                "环境配置完成",
-                f"Python：{python_path}\n"
-                f"安装方案：{accelerator}\n"
-                f"Torch 源：{torch_index}",
-            )
+            message = self._environment_dialog_message(payload, include_plan=True)
+            torch_index = str(payload.get("torch_index") or "默认").strip()
+            if torch_index:
+                message += f"\nTorch 源：{torch_index}"
+            dialog = messagebox.showwarning if self._environment_dialog_needs_warning(payload) else messagebox.showinfo
+            dialog("环境配置完成", message)
             return
 
         if tag == "DATASET_PREP_JSON":
@@ -3834,18 +4015,30 @@ class App:
         return "指标摘要：" + "，".join(parts) if parts else ""
 
     def _append_log(self, text: str) -> None:
+        self._append_log_batch([text])
+
+    def _append_log_batch(self, lines: list[str]) -> None:
+        if not lines:
+            return
+        text = "".join(f"{line}\n" for line in lines)
         self.log_text.configure(state="normal")
-        self.log_text.insert("end", text + "\n")
+        self.log_text.insert("end", text)
+        self._visible_log_lines += len(lines)
+        overflow = self._visible_log_lines - LOG_VISIBLE_LINE_LIMIT
+        if overflow > 0:
+            self.log_text.delete("1.0", f"{overflow + 1}.0")
+            self._visible_log_lines -= overflow
         self.log_text.see("end")
         self.log_text.configure(state="disabled")
         if self.current_log_handle is not None:
-            self.current_log_handle.write(text + "\n")
+            self.current_log_handle.write(text)
             self.current_log_handle.flush()
 
     def _clear_log_text(self) -> None:
         self.log_text.configure(state="normal")
         self.log_text.delete("1.0", "end")
         self.log_text.configure(state="disabled")
+        self._visible_log_lines = 0
 
     def _close_log_handle(self) -> None:
         if self.current_log_handle is not None:
