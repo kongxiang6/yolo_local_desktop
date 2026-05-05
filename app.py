@@ -19,6 +19,8 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 from typing import Any
 
+from annotation_studio import AnnotationStudio
+
 
 APP_NAME = "YoloTool"
 WINDOW_BG = "#eef4ff"
@@ -32,11 +34,159 @@ BORDER = "#dce7fb"
 TEXT = "#243348"
 TEXT_MUTED = "#6c7c96"
 SUCCESS = "#31c48d"
+DEFAULT_WINDOW_WIDTH = 1600
+DEFAULT_WINDOW_HEIGHT = 980
+COMPACT_MIN_WINDOW_WIDTH = 1180
+COMPACT_MIN_WINDOW_HEIGHT = 700
+MAX_DEFAULT_WINDOW_WIDTH = 2880
+MAX_DEFAULT_WINDOW_HEIGHT = 1660
+DEFAULT_WINDOW_REFERENCE_WIDTH = 1920
+DEFAULT_WINDOW_REFERENCE_HEIGHT = 1080
+DEFAULT_WINDOW_MIN_SCALE = 0.85
+DEFAULT_WINDOW_MAX_SCALE = 1.42
+DEFAULT_WINDOW_SCALE_EXPONENT = 0.75
+COMPACT_LAYOUT_WIDTH = 1360
+COMPACT_LAYOUT_HEIGHT = 760
+CONTENT_LEFT_WEIGHT = 6
+CONTENT_RIGHT_WEIGHT = 5
+FORM_DESCRIPTION_WRAP = 430
+DEFAULT_PLATFORM_DPI = 96.0
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 NO_WINDOW_FLAGS = CREATE_NO_WINDOW if os.name == "nt" else 0
 LOG_POLL_ACTIVE_MS = 40
 LOG_QUEUE_ITEMS_PER_TICK = 240
 LOG_VISIBLE_LINE_LIMIT = 2000
+
+
+def enable_windows_dpi_awareness() -> str | None:
+    if os.name != "nt":
+        return None
+
+    try:
+        import ctypes
+
+        user32 = ctypes.windll.user32
+        shcore = getattr(ctypes.windll, "shcore", None)
+
+        per_monitor_v2 = ctypes.c_void_p(-4)
+        if hasattr(user32, "SetProcessDpiAwarenessContext") and user32.SetProcessDpiAwarenessContext(per_monitor_v2):
+            return "per-monitor-v2"
+        if shcore is not None and hasattr(shcore, "SetProcessDpiAwareness") and shcore.SetProcessDpiAwareness(2) == 0:
+            return "per-monitor"
+        if hasattr(user32, "SetProcessDPIAware") and user32.SetProcessDPIAware():
+            return "system"
+    except Exception:
+        return None
+    return None
+
+
+def get_window_dpi_scale(root: tk.Misc) -> float:
+    try:
+        pixels_per_inch = float(root.winfo_fpixels("1i"))
+    except Exception:
+        return 1.0
+    if pixels_per_inch <= 0:
+        return 1.0
+    return max(1.0, pixels_per_inch / DEFAULT_PLATFORM_DPI)
+
+
+def sync_root_scaling_to_dpi(root: tk.Misc) -> float:
+    try:
+        pixels_per_inch = float(root.winfo_fpixels("1i"))
+    except Exception:
+        return 1.0
+    if pixels_per_inch <= 0:
+        return 1.0
+    tk_scaling = max(pixels_per_inch / 72.0, 1.0)
+    try:
+        root.tk.call("tk", "scaling", tk_scaling)
+    except Exception:
+        return 1.0
+    return tk_scaling
+
+
+def create_app_root() -> tk.Tk:
+    enable_windows_dpi_awareness()
+    root = tk.Tk()
+    sync_root_scaling_to_dpi(root)
+    return root
+
+
+def resolve_window_geometry(
+    root: tk.Tk,
+    *,
+    min_width: int,
+    min_height: int,
+    preferred_width: int = DEFAULT_WINDOW_WIDTH,
+    preferred_height: int = DEFAULT_WINDOW_HEIGHT,
+    min_width_floor: int = 1024,
+    min_height_floor: int = 660,
+    max_default_width: int = MAX_DEFAULT_WINDOW_WIDTH,
+    max_default_height: int = MAX_DEFAULT_WINDOW_HEIGHT,
+    default_margin: int = 72,
+    requested_margin: int = 48,
+) -> tuple[int, int, int, int]:
+    root.update_idletasks()
+    display_scale = get_window_dpi_scale(root)
+    screen_width = max(root.winfo_screenwidth(), 1)
+    screen_height = max(root.winfo_screenheight(), 1)
+    effective_screen_width = max(screen_width / display_scale, 1.0)
+    effective_screen_height = max(screen_height / display_scale, 1.0)
+    available_min_width = max(1.0, effective_screen_width - requested_margin)
+    available_min_height = max(1.0, effective_screen_height - requested_margin)
+    resolved_min_width_logical = min(min_width, max(min_width_floor, effective_screen_width - 96), available_min_width)
+    resolved_min_height_logical = min(min_height, max(min_height_floor, effective_screen_height - 96), available_min_height)
+
+    raw_scale = min(
+        effective_screen_width / max(DEFAULT_WINDOW_REFERENCE_WIDTH, 1),
+        effective_screen_height / max(DEFAULT_WINDOW_REFERENCE_HEIGHT, 1),
+    )
+    default_scale = min(
+        max(raw_scale**DEFAULT_WINDOW_SCALE_EXPONENT, DEFAULT_WINDOW_MIN_SCALE),
+        DEFAULT_WINDOW_MAX_SCALE,
+    )
+    scaled_default_width_logical = int(round(preferred_width * default_scale))
+    scaled_default_height_logical = int(round(preferred_height * default_scale))
+    default_width_logical = max(
+        resolved_min_width_logical,
+        min(max_default_width, max(1.0, effective_screen_width - default_margin), scaled_default_width_logical),
+    )
+    default_height_logical = max(
+        resolved_min_height_logical,
+        min(max_default_height, max(1.0, effective_screen_height - default_margin), scaled_default_height_logical),
+    )
+    resolved_min_width = max(1, int(round(resolved_min_width_logical * display_scale)))
+    resolved_min_height = max(1, int(round(resolved_min_height_logical * display_scale)))
+    default_width = max(1, int(round(default_width_logical * display_scale)))
+    default_height = max(1, int(round(default_height_logical * display_scale)))
+
+    requested_width = 0
+    requested_height = 0
+    geometry_token = root.winfo_geometry().split("+", 1)[0]
+    if "x" in geometry_token:
+        width_text, height_text = geometry_token.split("x", 1)
+        try:
+            requested_width = int(width_text)
+            requested_height = int(height_text)
+        except ValueError:
+            requested_width = 0
+            requested_height = 0
+
+    physical_requested_margin = max(1, int(round(requested_margin * display_scale)))
+    max_requested_width = max(resolved_min_width, screen_width - physical_requested_margin)
+    max_requested_height = max(resolved_min_height, screen_height - physical_requested_margin)
+    if requested_width > 1 and requested_height > 1:
+        width = min(max(resolved_min_width, requested_width), max_requested_width)
+        height = min(max(resolved_min_height, requested_height), max_requested_height)
+    else:
+        width = default_width
+        height = default_height
+
+    return width, height, resolved_min_width, resolved_min_height
+
+
+def is_compact_window(width: int, height: int) -> bool:
+    return width <= COMPACT_LAYOUT_WIDTH or height <= COMPACT_LAYOUT_HEIGHT
 
 PARAMETER_HINTS: dict[str, str] = {
     "epochs": "训练多少轮。数值越大，训练越久；新手一般先从 50 或 100 开始。",
@@ -264,6 +414,7 @@ PREP_COPY_MODE_LABEL_TO_ID = {
 }
 
 ACTION_ID_TO_LABEL = {
+    "annotate": "标注",
     "train": "训练",
     "val": "验证",
     "predict": "预测",
@@ -375,6 +526,8 @@ WORK_DIR = resolve_work_dir()
 BACKEND = RESOURCE_DIR / "backend.py"
 CONTRACT_DIR = RESOURCE_DIR / "contracts"
 PRESET_ROOT = WORK_DIR / "presets"
+ANNOTATION_SESSION_PATH = WORK_DIR / "_local" / "annotation_sessions.json"
+SEGMENTATION_SESSION_PATH = WORK_DIR / "_local" / "segmentation_sessions.json"
 ICON_PNG = RESOURCE_DIR / "assets" / "yolotool_icon.png"
 ICON_ICO = RESOURCE_DIR / "assets" / "yolotool_icon.ico"
 BUNDLED_RUNTIME_DIR = WORK_DIR / "runtime" / "python"
@@ -991,7 +1144,7 @@ class AccordionSection(tk.Frame):
         super().__init__(parent, bg=CARD_BG, highlightbackground=BORDER, highlightthickness=1)
         self.expanded = expanded
 
-        self.header = tk.Frame(self, bg=CARD_BG, height=42)
+        self.header = tk.Frame(self, bg=CARD_BG, height=38)
         self.header.pack(fill="x")
         self.header.pack_propagate(False)
         self.header.grid_columnconfigure(1, weight=1)
@@ -1061,8 +1214,7 @@ class App:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title(APP_NAME)
-        self.root.geometry("1600x980")
-        self.root.minsize(1320, 860)
+        self._configure_window_geometry()
         self.root.configure(bg=WINDOW_BG)
 
         self.train_contract = load_json(CONTRACT_DIR / "train_capabilities.json")
@@ -1153,6 +1305,9 @@ class App:
         self.export_format_label_var.set(first_export_label)
 
         self.train_action_buttons: dict[str, tk.Button] = {}
+        self.annotation_tab_button: tk.Button | None = None
+        self.annotation_page: tk.Frame | None = None
+        self.annotation_editor: AnnotationStudio | None = None
         self.train_preset_combo: SmartComboBox | None = None
         self.export_preset_combo: SmartComboBox | None = None
         self.train_start_button: tk.Button | None = None
@@ -1193,6 +1348,17 @@ class App:
         self._refresh_status_visuals()
 
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _configure_window_geometry(self) -> None:
+        width, height, min_width, min_height = resolve_window_geometry(
+            self.root,
+            min_width=COMPACT_MIN_WINDOW_WIDTH,
+            min_height=COMPACT_MIN_WINDOW_HEIGHT,
+            preferred_width=DEFAULT_WINDOW_WIDTH,
+            preferred_height=DEFAULT_WINDOW_HEIGHT,
+        )
+        self.root.geometry(f"{width}x{height}")
+        self.root.minsize(min_width, min_height)
 
     def _configure_styles(self) -> None:
         style = ttk.Style(self.root)
@@ -1239,11 +1405,11 @@ class App:
 
         self._build_shell_header()
 
-        self.content = tk.Frame(self.root, bg=WINDOW_BG, padx=16, pady=0)
+        self.content = tk.Frame(self.root, bg=WINDOW_BG, padx=14, pady=0)
         self.content.grid(row=1, column=0, sticky="nsew")
         self.content.grid_rowconfigure(0, weight=1)
-        self.content.grid_columnconfigure(0, weight=3)
-        self.content.grid_columnconfigure(1, weight=2)
+        self.content.grid_columnconfigure(0, weight=CONTENT_LEFT_WEIGHT)
+        self.content.grid_columnconfigure(1, weight=CONTENT_RIGHT_WEIGHT)
 
         footer = tk.Label(
             self.root,
@@ -1253,17 +1419,17 @@ class App:
             anchor="w",
             font=("Microsoft YaHei UI", 9),
             padx=18,
-            pady=10,
+            pady=8,
         )
         footer.grid(row=2, column=0, sticky="ew")
 
-        self.left_panel = tk.Frame(self.content, bg=CARD_BG, padx=14, pady=14, highlightbackground=BORDER, highlightthickness=1)
-        self.left_panel.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+        self.left_panel = tk.Frame(self.content, bg=CARD_BG, padx=12, pady=12, highlightbackground=BORDER, highlightthickness=1)
+        self.left_panel.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
         self.left_panel.grid_rowconfigure(2, weight=1)
         self.left_panel.grid_columnconfigure(0, weight=1)
 
-        self.right_panel = tk.Frame(self.content, bg=CARD_BG, padx=14, pady=14, highlightbackground=BORDER, highlightthickness=1)
-        self.right_panel.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
+        self.right_panel = tk.Frame(self.content, bg=CARD_BG, padx=12, pady=12, highlightbackground=BORDER, highlightthickness=1)
+        self.right_panel.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
         self.right_panel.grid_rowconfigure(1, weight=1)
         self.right_panel.grid_columnconfigure(0, weight=1)
 
@@ -1271,8 +1437,8 @@ class App:
         self._build_right_panel()
 
     def _build_shell_header(self) -> None:
-        header = tk.Frame(self.root, bg=WINDOW_BG, height=52)
-        header.grid(row=0, column=0, sticky="ew", padx=16, pady=(16, 8))
+        header = tk.Frame(self.root, bg=WINDOW_BG, height=50)
+        header.grid(row=0, column=0, sticky="ew", padx=14, pady=(14, 6))
         header.grid_columnconfigure(0, weight=1)
         header.pack_propagate(False)
 
@@ -1314,6 +1480,7 @@ class App:
         self.log_text = scrolledtext.ScrolledText(
             log_box["body"],
             wrap="word",
+            height=8,
             bg=CARD_SOFT,
             fg=TEXT,
             relief="flat",
@@ -1329,9 +1496,29 @@ class App:
 
     def _build_right_panel(self) -> None:
         tab_bar = tk.Frame(self.right_panel, bg=CARD_BG)
-        tab_bar.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        tab_bar.grid(row=0, column=0, sticky="ew", pady=(0, 8))
         tab_bar.grid_columnconfigure(0, weight=1)
         tab_bar.grid_columnconfigure(1, weight=1)
+        tab_bar.grid_columnconfigure(2, weight=1)
+
+        self.annotation_tab_button = tk.Button(
+            tab_bar,
+            text="标注工作台",
+            command=lambda: self._show_tab("annotation"),
+            bg=CARD_BG,
+            fg=TEXT,
+            activebackground=PRIMARY_SOFT,
+            activeforeground=TEXT,
+            relief="flat",
+            bd=0,
+            highlightthickness=1,
+            highlightbackground=BORDER,
+            highlightcolor=PRIMARY,
+            font=("Microsoft YaHei UI", 11, "bold"),
+            pady=10,
+            cursor="hand2",
+        )
+        self.annotation_tab_button.grid(row=0, column=0, sticky="ew", padx=(0, 6))
 
         self.train_tab_button = tk.Button(
             tab_bar,
@@ -1347,10 +1534,10 @@ class App:
             highlightbackground=BORDER,
             highlightcolor=PRIMARY,
             font=("Microsoft YaHei UI", 11, "bold"),
-            pady=12,
+            pady=10,
             cursor="hand2",
         )
-        self.train_tab_button.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        self.train_tab_button.grid(row=0, column=1, sticky="ew", padx=(0, 6))
 
         self.export_tab_button = tk.Button(
             tab_bar,
@@ -1366,10 +1553,15 @@ class App:
             highlightbackground=BORDER,
             highlightcolor=PRIMARY,
             font=("Microsoft YaHei UI", 11, "bold"),
-            pady=12,
+            pady=10,
             cursor="hand2",
         )
-        self.export_tab_button.grid(row=0, column=1, sticky="ew", padx=(6, 0))
+        self.export_tab_button.grid(row=0, column=2, sticky="ew")
+
+        self.annotation_page = tk.Frame(self.right_panel, bg=CARD_BG)
+        self.annotation_page.grid(row=1, column=0, sticky="nsew")
+        self.annotation_page.grid_rowconfigure(0, weight=1)
+        self.annotation_page.grid_columnconfigure(0, weight=1)
 
         self.train_scroll = ScrollableFrame(self.right_panel, background=CARD_BG)
         self.train_scroll.grid(row=1, column=0, sticky="nsew")
@@ -1377,8 +1569,23 @@ class App:
         self.export_scroll = ScrollableFrame(self.right_panel, background=CARD_BG)
         self.export_scroll.grid(row=1, column=0, sticky="nsew")
 
+        self._build_annotation_view(self.annotation_page)
         self._build_train_view(self.train_scroll.inner)
         self._build_export_view(self.export_scroll.inner)
+
+    def _build_annotation_view(self, parent: tk.Widget) -> None:
+        self.annotation_editor = AnnotationStudio(
+            parent,
+            detect_session_path=ANNOTATION_SESSION_PATH,
+            segment_session_path=SEGMENTATION_SESSION_PATH,
+            on_state_change=self._refresh_summary,
+            on_notice=self._handle_annotation_notice,
+            on_export_request=self.start_prepare_dataset_from_annotation,
+            on_auto_label_request=self.start_annotation_auto_label,
+            on_dataset_ready=self._handle_annotation_dataset_ready,
+            on_switch_to_train=self._open_train_workspace_from_annotation,
+        )
+        self.annotation_editor.pack(fill="both", expand=True)
 
     def _build_train_view(self, parent: tk.Widget) -> None:
         parent.grid_columnconfigure(0, weight=1)
@@ -1388,7 +1595,7 @@ class App:
         row += 1
 
         action_bar = tk.Frame(parent, bg=CARD_BG)
-        action_bar.grid(row=row, column=0, sticky="ew", pady=(0, 8))
+        action_bar.grid(row=row, column=0, sticky="ew", pady=(0, 6))
         for index, action_id in enumerate(("train", "val", "predict", "track")):
             action_bar.grid_columnconfigure(index, weight=1)
             button = tk.Button(
@@ -1405,7 +1612,7 @@ class App:
                 highlightbackground=BORDER,
                 highlightcolor=PRIMARY,
                 font=("Microsoft YaHei UI", 10, "bold"),
-                pady=8,
+                pady=7,
                 cursor="hand2",
             )
             button.grid(row=0, column=index, sticky="ew", padx=(0, 6) if index < 3 else 0)
@@ -1497,22 +1704,22 @@ class App:
 
     def _create_section(self, parent: tk.Widget, row: int, title: str, expanded: bool = False) -> AccordionSection:
         section = AccordionSection(parent, title, expanded=expanded)
-        section.grid(row=row, column=0, sticky="ew", pady=(0, 8))
+        section.grid(row=row, column=0, sticky="ew", pady=(0, 6))
         return section
 
     def _create_workspace_banner(self, parent: tk.Widget, row: int, title: str) -> None:
         banner = tk.Frame(parent, bg=PRIMARY_SOFT, highlightbackground=BORDER, highlightthickness=1)
-        banner.grid(row=row, column=0, sticky="ew", pady=(0, 8))
+        banner.grid(row=row, column=0, sticky="ew", pady=(0, 6))
         banner.grid_columnconfigure(0, weight=1)
         tk.Label(
             banner,
             text=title,
             bg=PRIMARY_SOFT,
             fg=TEXT,
-            font=("Microsoft YaHei UI", 15, "bold"),
+            font=("Microsoft YaHei UI", 14, "bold"),
             anchor="w",
-            padx=18,
-            pady=12,
+            padx=16,
+            pady=9,
         ).grid(row=0, column=0, sticky="w")
         tk.Label(
             banner,
@@ -1520,7 +1727,7 @@ class App:
             bg=PRIMARY_SOFT,
             fg=PRIMARY,
             font=("Microsoft YaHei UI", 9),
-            padx=12,
+            padx=10,
         ).grid(row=0, column=1, sticky="e")
 
     def _create_box(self, parent: tk.Widget, title: str) -> dict[str, tk.Widget]:
@@ -1580,10 +1787,15 @@ class App:
         return entry
 
     def _build_env_section(self, parent: tk.Widget, *, scope: str) -> None:
-        check_text = "检查当前环境"
+        _ = scope
+        button_row = tk.Frame(parent, bg=PANEL_BG)
+        button_row.pack(fill="x", padx=8, pady=(8, 8))
+        button_row.grid_columnconfigure(0, weight=3)
+        button_row.grid_columnconfigure(1, weight=2)
+
         install_button = tk.Button(
-            parent,
-            text="在线一键配置环境（自动识别 CPU / NVIDIA）",
+            button_row,
+            text="一键配置内置环境",
             command=self.start_configure_environment,
             bg=PRIMARY,
             fg="white",
@@ -1595,18 +1807,18 @@ class App:
             highlightbackground=PRIMARY,
             highlightcolor=PRIMARY,
             font=("Microsoft YaHei UI", 11, "bold"),
-            pady=9,
+            pady=8,
             cursor="hand2",
         )
-        install_button.pack(fill="x", padx=14, pady=(0, 8))
+        install_button.grid(row=0, column=0, sticky="ew", padx=(0, 4))
         ToolTip(
             install_button,
             "只会检查并配置软件内置 runtime。缺少内置环境时会自动在线创建，不会往别的路径里安装环境。",
         )
 
         check_button = tk.Button(
-            parent,
-            text=check_text,
+            button_row,
+            text="检查当前环境",
             command=self.start_check_environment,
             bg=CARD_BG,
             fg=TEXT,
@@ -1621,12 +1833,12 @@ class App:
             pady=8,
             cursor="hand2",
         )
-        check_button.pack(fill="x", padx=14, pady=(0, 8))
+        check_button.grid(row=0, column=1, sticky="ew", padx=(4, 0))
         ToolTip(check_button, "检查的是软件当前内置 runtime 是否完整可用，并把版本信息输出到左侧日志。")
 
     def _build_train_entry_section(self, parent: tk.Widget) -> None:
         grid = tk.Frame(parent, bg=PANEL_BG)
-        grid.pack(fill="x", padx=10, pady=10)
+        grid.pack(fill="x", padx=8, pady=8)
         for column in range(2):
             grid.grid_columnconfigure(column * 2 + 1, weight=1)
 
@@ -1710,7 +1922,7 @@ class App:
 
     def _build_val_entry_section(self, parent: tk.Widget) -> None:
         grid = tk.Frame(parent, bg=PANEL_BG)
-        grid.pack(fill="x", padx=10, pady=10)
+        grid.pack(fill="x", padx=8, pady=8)
         grid.grid_columnconfigure(1, weight=1)
 
         self._create_form_row(
@@ -1741,7 +1953,7 @@ class App:
 
     def _build_predict_entry_section(self, parent: tk.Widget) -> None:
         grid = tk.Frame(parent, bg=PANEL_BG)
-        grid.pack(fill="x", padx=10, pady=10)
+        grid.pack(fill="x", padx=8, pady=8)
         grid.grid_columnconfigure(1, weight=1)
 
         self._create_form_row(
@@ -1774,7 +1986,7 @@ class App:
 
     def _build_track_entry_section(self, parent: tk.Widget) -> None:
         grid = tk.Frame(parent, bg=PANEL_BG)
-        grid.pack(fill="x", padx=10, pady=10)
+        grid.pack(fill="x", padx=8, pady=8)
         grid.grid_columnconfigure(1, weight=1)
 
         self._create_form_row(
@@ -1815,10 +2027,10 @@ class App:
             justify="left",
             font=("Microsoft YaHei UI", 10),
         )
-        note.pack(fill="x", padx=14, pady=(10, 8))
+        note.pack(fill="x", padx=14, pady=(8, 8))
 
         grid = tk.Frame(parent, bg=PANEL_BG)
-        grid.pack(fill="x", padx=10)
+        grid.pack(fill="x", padx=8)
         grid.grid_columnconfigure(1, weight=1)
 
         raw_row = tk.Frame(grid, bg=PANEL_BG)
@@ -1941,10 +2153,10 @@ class App:
     def _build_train_group_section(self, parent: tk.Widget, group: dict) -> None:
         group_id = str(group.get("id") or "")
         reset_button = self._create_ghost_button(parent, "恢复官方默认值", lambda gid=group_id: self._reset_train_group(gid))
-        reset_button.pack(fill="x", padx=10, pady=(10, 10))
+        reset_button.pack(fill="x", padx=8, pady=(8, 8))
 
         fields_box = tk.Frame(parent, bg=PANEL_BG)
-        fields_box.pack(fill="x", padx=10, pady=(0, 10))
+        fields_box.pack(fill="x", padx=8, pady=(0, 8))
         fields_box.grid_columnconfigure(0, weight=1)
 
         keys: list[str] = []
@@ -1955,10 +2167,10 @@ class App:
 
     def _build_param_group_section(self, parent: tk.Widget, specs: list[dict[str, Any]], store: dict[str, dict[str, Any]], group_id: str) -> None:
         reset_button = self._create_ghost_button(parent, "恢复官方默认值", lambda: self._reset_spec_store(store))
-        reset_button.pack(fill="x", padx=10, pady=(10, 10))
+        reset_button.pack(fill="x", padx=8, pady=(8, 8))
 
         fields_box = tk.Frame(parent, bg=PANEL_BG)
-        fields_box.pack(fill="x", padx=10, pady=(0, 10))
+        fields_box.pack(fill="x", padx=8, pady=(0, 8))
         fields_box.grid_columnconfigure(0, weight=1)
 
         for row_index, spec in enumerate(specs):
@@ -1966,7 +2178,7 @@ class App:
 
     def _build_export_entry_section(self, parent: tk.Widget) -> None:
         grid = tk.Frame(parent, bg=PANEL_BG)
-        grid.pack(fill="x", padx=10, pady=10)
+        grid.pack(fill="x", padx=8, pady=8)
         grid.grid_columnconfigure(1, weight=1)
 
         weight_row = tk.Frame(grid, bg=PANEL_BG)
@@ -2014,10 +2226,10 @@ class App:
 
     def _build_export_params_section(self, parent: tk.Widget) -> None:
         reset_button = self._create_ghost_button(parent, "恢复官方默认值", self._reset_export_params)
-        reset_button.pack(fill="x", padx=10, pady=(10, 10))
+        reset_button.pack(fill="x", padx=8, pady=(8, 8))
 
         fields_box = tk.Frame(parent, bg=PANEL_BG)
-        fields_box.pack(fill="x", padx=10, pady=(0, 10))
+        fields_box.pack(fill="x", padx=8, pady=(0, 8))
         fields_box.grid_columnconfigure(0, weight=1)
 
         export_specs = [
@@ -2041,36 +2253,71 @@ class App:
 
     def _build_run_section(self, parent: tk.Widget, *, scope: str) -> None:
         wrapper = tk.Frame(parent, bg=PANEL_BG)
-        wrapper.pack(fill="x", padx=10, pady=10)
+        wrapper.pack(fill="x", padx=8, pady=8)
         wrapper.grid_columnconfigure(1, weight=1)
 
         mode_var = self.selected_train_action_label_var if scope == "train" else self.export_mode_label_var
         preset_var = self.train_preset_var if scope == "train" else self.export_preset_var
         recommended_var = self.train_recommended_preset_var if scope == "train" else self.export_recommended_preset_var
 
-        tk.Label(wrapper, text="功能", bg=PANEL_BG, fg=TEXT_MUTED, font=("Microsoft YaHei UI", 10)).grid(row=0, column=0, sticky="w")
-        tk.Label(wrapper, textvariable=mode_var, bg=PANEL_BG, fg=TEXT, font=("Microsoft YaHei UI", 10, "bold")).grid(row=0, column=1, sticky="w")
+        summary_strip = tk.Frame(wrapper, bg=PRIMARY_SOFT, highlightbackground=BORDER, highlightthickness=1)
+        summary_strip.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 8))
+        summary_strip.grid_columnconfigure(1, weight=1)
+        summary_strip.grid_columnconfigure(3, weight=1)
 
-        tk.Label(wrapper, text="状态", bg=PANEL_BG, fg=TEXT_MUTED, font=("Microsoft YaHei UI", 10)).grid(row=1, column=0, sticky="w", pady=(2, 0))
-        status_label = tk.Label(wrapper, textvariable=self.process_status_var, bg=PANEL_BG, fg=TEXT, font=("Microsoft YaHei UI", 10, "bold"))
-        status_label.grid(row=1, column=1, sticky="w", pady=(2, 0))
+        tk.Label(
+            summary_strip,
+            text="功能",
+            bg=PRIMARY_SOFT,
+            fg=TEXT_MUTED,
+            font=("Microsoft YaHei UI", 10),
+            padx=12,
+            pady=8,
+        ).grid(row=0, column=0, sticky="w")
+        tk.Label(
+            summary_strip,
+            textvariable=mode_var,
+            bg=PRIMARY_SOFT,
+            fg=TEXT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            pady=8,
+        ).grid(row=0, column=1, sticky="w")
+
+        tk.Label(
+            summary_strip,
+            text="状态",
+            bg=PRIMARY_SOFT,
+            fg=TEXT_MUTED,
+            font=("Microsoft YaHei UI", 10),
+            padx=8,
+            pady=8,
+        ).grid(row=0, column=2, sticky="w", padx=(16, 0))
+        status_label = tk.Label(
+            summary_strip,
+            textvariable=self.process_status_var,
+            bg=PRIMARY_SOFT,
+            fg=TEXT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            pady=8,
+        )
+        status_label.grid(row=0, column=3, sticky="w", padx=(0, 12))
         self.process_status_labels.append(status_label)
 
         preset_name_row = tk.Frame(wrapper, bg=PANEL_BG)
         preset_name_row.grid_columnconfigure(0, weight=1)
         self._create_entry(preset_name_row, preset_var, readonly=False).grid(row=0, column=0, sticky="ew")
         load_button = self._create_small_button(preset_name_row, "加载", lambda item=scope: self._load_preset(item))
-        load_button.grid(row=0, column=1, padx=(8, 0))
+        load_button.grid(row=0, column=1, padx=(6, 0))
         save_button = self._create_small_button(preset_name_row, "保存", lambda item=scope: self._save_preset(item))
-        save_button.grid(row=0, column=2, padx=(8, 0))
+        save_button.grid(row=0, column=2, padx=(6, 0))
         delete_button = self._create_small_button(preset_name_row, "删除", lambda item=scope: self._delete_preset(item))
-        delete_button.grid(row=0, column=3, padx=(8, 0))
+        delete_button.grid(row=0, column=3, padx=(6, 0))
         ToolTip(load_button, "按左侧输入的预设名加载自定义预设；如果名字与推荐预设同名，也会直接套用推荐方案。")
         ToolTip(save_button, "把当前参数保存成自定义预设。需要先在输入框里填一个自己的预设名称。")
         ToolTip(delete_button, "删除当前输入名称对应的自定义预设。内置推荐预设不会被删除。")
         self._create_form_row(
             wrapper,
-            row=2,
+            row=1,
             label="参数预设",
             widget=preset_name_row,
             description="这里默认留空，可直接输入自己的预设名称后保存；加载和删除也是按这里输入的名称执行。",
@@ -2083,16 +2330,21 @@ class App:
         preset_combo.bind("<<ComboboxSelected>>", lambda _event, item=scope: self._load_recommended_preset(item), add="+")
         self._create_form_row(
             wrapper,
-            row=3,
+            row=2,
             label="推荐预设",
             widget=recommended_row,
             description="这里是软件内置推荐方案，下拉选择后会立即应用，不会覆盖你自己保存的预设名称。",
         )
 
+        action_row = tk.Frame(wrapper, bg=PANEL_BG)
+        action_row.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(8, 4))
+        action_row.grid_columnconfigure(0, weight=1)
+        action_row.grid_columnconfigure(1, weight=1)
+
         if scope == "train":
             self.train_preset_combo = preset_combo
             self.train_start_button = tk.Button(
-                wrapper,
+                action_row,
                 text="开始训练",
                 command=self._run_current_train_action,
                 bg=PRIMARY,
@@ -2105,14 +2357,14 @@ class App:
                 highlightbackground=PRIMARY,
                 highlightcolor=PRIMARY,
                 font=("Microsoft YaHei UI", 11, "bold"),
-                pady=8,
+                pady=7,
                 cursor="hand2",
             )
             start_button = self.train_start_button
         else:
             self.export_preset_combo = preset_combo
             self.export_start_button = tk.Button(
-                wrapper,
+                action_row,
                 text="开始导出",
                 command=self.start_export,
                 bg=PRIMARY,
@@ -2125,16 +2377,13 @@ class App:
                 highlightbackground=PRIMARY,
                 highlightcolor=PRIMARY,
                 font=("Microsoft YaHei UI", 11, "bold"),
-                pady=8,
+                pady=7,
                 cursor="hand2",
             )
             start_button = self.export_start_button
 
-        start_button.grid(row=8, column=0, columnspan=2, sticky="ew", pady=(10, 4))
-        ToolTip(start_button, "确认当前入口、模型、数据和参数后，从这里启动任务。")
-
         stop_button = tk.Button(
-            wrapper,
+            action_row,
             text="停止任务",
             command=self.stop_process,
             bg=CARD_BG,
@@ -2147,14 +2396,11 @@ class App:
             highlightbackground=BORDER,
             highlightcolor=PRIMARY,
             font=("Microsoft YaHei UI", 11),
-            pady=8,
+            pady=7,
             cursor="hand2",
         )
-        stop_button.grid(row=9, column=0, columnspan=2, sticky="ew", pady=(0, 4))
-        ToolTip(stop_button, "任务运行中可点这里发送停止信号；空闲时按钮会自动置灰。")
-
         open_result_button = tk.Button(
-            wrapper,
+            action_row,
             text="打开结果",
             command=self.open_result_location,
             bg=CARD_BG,
@@ -2167,14 +2413,11 @@ class App:
             highlightbackground=BORDER,
             highlightcolor=PRIMARY,
             font=("Microsoft YaHei UI", 11),
-            pady=8,
+            pady=7,
             cursor="hand2",
         )
-        open_result_button.grid(row=10, column=0, sticky="ew", pady=(0, 4), padx=(0, 5))
-        ToolTip(open_result_button, "打开最近一次任务的结果目录；没有结果时按钮会自动置灰。")
-
         open_log_button = tk.Button(
-            wrapper,
+            action_row,
             text="打开日志",
             command=self.open_log_file,
             bg=CARD_BG,
@@ -2187,14 +2430,22 @@ class App:
             highlightbackground=BORDER,
             highlightcolor=PRIMARY,
             font=("Microsoft YaHei UI", 11),
-            pady=8,
+            pady=7,
             cursor="hand2",
         )
-        open_log_button.grid(row=10, column=1, sticky="ew", pady=(0, 4), padx=(5, 0))
+
+        start_button.grid(row=0, column=0, sticky="ew", padx=(0, 4))
+        stop_button.grid(row=0, column=1, sticky="ew", padx=(4, 0))
+        open_result_button.grid(row=1, column=0, sticky="ew", pady=(8, 0), padx=(0, 4))
+        open_log_button.grid(row=1, column=1, sticky="ew", pady=(8, 0), padx=(4, 0))
+
+        ToolTip(start_button, "确认当前入口、模型、数据和参数后，从这里启动任务。")
+        ToolTip(stop_button, "任务运行中可点这里发送停止信号；空闲时按钮会自动置灰。")
+        ToolTip(open_result_button, "打开最近一次任务的结果目录；没有结果时按钮会自动置灰。")
         ToolTip(open_log_button, "打开当前任务对应的日志文件；尚未生成日志时按钮会自动置灰。")
 
         result_entry = self._create_entry(wrapper, self.result_location_var, readonly=True)
-        self._create_form_row(wrapper, row=11, label="结果位置", widget=result_entry)
+        self._create_form_row(wrapper, row=4, label="结果位置", widget=result_entry)
 
         if scope == "train":
             self.train_preset_buttons = {"load": load_button, "save": save_button, "delete": delete_button}
@@ -2225,7 +2476,7 @@ class App:
             anchor="w",
         )
         label_widget.grid(row=row * 2, column=0, sticky="w", padx=(0, 10), pady=(0, 4))
-        widget.grid(row=row * 2, column=1, sticky="ew", pady=(0, 4))
+        widget.grid(row=row * 2, column=1, sticky="ew", pady=(0, 3))
         if description:
             ToolTip(label_widget, description)
             ToolTip(widget, description)
@@ -2234,14 +2485,14 @@ class App:
                 text=description,
                 bg=parent.cget("bg"),
                 fg=TEXT_MUTED,
-                wraplength=360,
+                wraplength=FORM_DESCRIPTION_WRAP,
                 justify="left",
                 font=("Microsoft YaHei UI", 10),
-            ).grid(row=row * 2 + 1, column=1, sticky="w", pady=(0, 8))
+            ).grid(row=row * 2 + 1, column=1, sticky="w", pady=(0, 6))
 
     def _create_spec_row(self, parent: tk.Widget, row: int, spec: dict[str, Any], store: dict[str, dict[str, Any]], *, group_id: str) -> None:
         container = tk.Frame(parent, bg=parent.cget("bg"))
-        container.grid(row=row, column=0, sticky="ew", pady=(0, 10))
+        container.grid(row=row, column=0, sticky="ew", pady=(0, 8))
         container.grid_columnconfigure(1, weight=1)
 
         label_widget = tk.Label(
@@ -2251,7 +2502,7 @@ class App:
             fg=TEXT_MUTED,
             font=("Microsoft YaHei UI", 10),
             anchor="w",
-            width=12,
+            width=11,
         )
         label_widget.grid(row=0, column=0, sticky="nw", padx=(0, 10))
 
@@ -2297,10 +2548,10 @@ class App:
             text=description,
             bg=container.cget("bg"),
             fg=TEXT_MUTED,
-            wraplength=360,
+            wraplength=FORM_DESCRIPTION_WRAP,
             justify="left",
             font=("Microsoft YaHei UI", 10),
-        ).grid(row=1, column=1, sticky="w", pady=(4, 0))
+        ).grid(row=1, column=1, sticky="w", pady=(3, 0))
 
         store[str(spec["key"])] = {
             "spec": spec,
@@ -2434,21 +2685,57 @@ class App:
         ToolTip.hide_all()
         SmartComboBox.close_all()
         self.active_tab.set(tab)
+        for tab_id, button in (
+            ("annotation", self.annotation_tab_button),
+            ("train", self.train_tab_button),
+            ("export", self.export_tab_button),
+        ):
+            if button is None:
+                continue
+            is_active = tab_id == tab
+            button.configure(
+                bg=PRIMARY if is_active else CARD_BG,
+                fg="white" if is_active else TEXT,
+                activebackground=PRIMARY_DARK if is_active else PRIMARY_SOFT,
+                activeforeground="white" if is_active else TEXT,
+            )
+
+        if self.annotation_page is not None:
+            if tab == "annotation":
+                self.annotation_page.grid()
+            else:
+                self.annotation_page.grid_remove()
+
+        if tab == "annotation":
+            self.left_panel.grid_remove()
+            self.right_panel.grid_configure(column=0, columnspan=2, padx=0)
+            self.content.grid_columnconfigure(0, weight=1)
+            self.content.grid_columnconfigure(1, weight=1)
+        else:
+            self.left_panel.grid()
+            self.right_panel.grid_configure(column=1, columnspan=1, padx=(8, 0))
+            self.content.grid_columnconfigure(0, weight=CONTENT_LEFT_WEIGHT)
+            self.content.grid_columnconfigure(1, weight=CONTENT_RIGHT_WEIGHT)
+
         if tab == "train":
-            self.train_tab_button.configure(bg=PRIMARY, fg="white")
-            self.export_tab_button.configure(bg=CARD_BG, fg=TEXT)
             self.train_scroll.grid()
             self.export_scroll.grid_remove()
             self._reset_scroll_to_top(self.train_scroll)
-        else:
-            self.train_tab_button.configure(bg=CARD_BG, fg=TEXT)
-            self.export_tab_button.configure(bg=PRIMARY, fg="white")
+        elif tab == "export":
             self.export_scroll.grid()
             self.train_scroll.grid_remove()
             self._reset_scroll_to_top(self.export_scroll)
+        else:
+            self.train_scroll.grid_remove()
+            self.export_scroll.grid_remove()
         if not self.process and self.left_log_state_var.get() in {"暂无", "已完成", "已结束", "已取消"}:
-            self._set_log_placeholder(tab if tab == "export" else self.train_action_var.get())
+            placeholder_mode = "annotate" if tab == "annotation" else ("export" if tab == "export" else self.train_action_var.get())
+            self._set_log_placeholder(placeholder_mode)
         self._refresh_summary()
+
+    def _open_train_workspace_from_annotation(self) -> None:
+        self._show_train_action("train")
+        self._show_tab("train")
 
     def _show_train_action(self, action: str) -> None:
         ToolTip.hide_all()
@@ -2629,6 +2916,29 @@ class App:
         return "跟随权重目录"
 
     def _refresh_summary(self) -> None:
+        if self.active_tab.get() == "annotation":
+            workspace_label = "标注工作台"
+            project_dir = "\u672a\u9009\u62e9"
+            current_image = "\u672a\u9009\u62e9"
+            preview = "\u672a\u9009\u62e9"
+            if self.annotation_editor is not None:
+                if hasattr(self.annotation_editor, "active_workspace_label"):
+                    workspace_label = str(self.annotation_editor.active_workspace_label())
+                if self.annotation_editor.project_dir is not None:
+                    project_dir = str(self.annotation_editor.project_dir)
+                current_image = self.annotation_editor.current_image_name()
+                preview = self.annotation_editor.export_preview_dir()
+            self.summary_label1.set("当前工作区")
+            self.summary_label2.set("当前目录/来源")
+            self.summary_label3.set("当前图片/输出预览")
+            self.summary_value1.set(workspace_label)
+            self.summary_value2.set(project_dir)
+            self.summary_value3.set(current_image if current_image != "未选择" else preview)
+            result_location = str(self.last_result_path) if self.last_result_path and self.last_result_path.exists() else (project_dir if project_dir != "\u672a\u9009\u62e9" else "")
+            self.result_location_var.set(result_location)
+            self._refresh_run_action_buttons()
+            return
+
         if self.active_tab.get() == "export":
             self.summary_label1.set("权重")
             self.summary_label2.set("任务类型")
@@ -2677,11 +2987,12 @@ class App:
 
     def _set_log_placeholder(self, mode: str) -> None:
         text_map = {
-            "train": "暂无运行日志。\n\n开始训练后，这里显示 Ultralytics 实时输出。",
-            "val": "暂无运行日志。\n\n开始验证后，这里显示验证过程与指标摘要。",
-            "predict": "暂无运行日志。\n\n开始预测后，这里显示预测过程和保存位置。",
-            "track": "暂无运行日志。\n\n开始跟踪后，这里显示跟踪过程和保存位置。",
-            "export": "暂无运行日志。\n\n开始导出后，这里显示官方导出输出。",
+            "annotate": "\u6682\u65e0\u8fd0\u884c\u65e5\u5fd7\u3002\n\n\u5728\u201c\u6807\u6ce8\u201d\u5de5\u4f5c\u53f0\u91cc\u9009\u62e9\u56fe\u7247\u76ee\u5f55\u540e\uff0c\u53ef\u4ee5\u7528\u81ea\u52a8\u6807\u6ce8\u548c\u624b\u52a8\u4fee\u8ba2\u5b8c\u6210\u6570\u636e\u96c6\u3002",
+            "train": "\u6682\u65e0\u8fd0\u884c\u65e5\u5fd7\u3002\n\n\u5f00\u59cb\u8bad\u7ec3\u540e\uff0c\u8fd9\u91cc\u4f1a\u663e\u793a Ultralytics \u5b9e\u65f6\u8f93\u51fa\u3002",
+            "val": "\u6682\u65e0\u8fd0\u884c\u65e5\u5fd7\u3002\n\n\u5f00\u59cb\u9a8c\u8bc1\u540e\uff0c\u8fd9\u91cc\u4f1a\u663e\u793a\u9a8c\u8bc1\u8fc7\u7a0b\u548c\u6307\u6807\u6458\u8981\u3002",
+            "predict": "\u6682\u65e0\u8fd0\u884c\u65e5\u5fd7\u3002\n\n\u5f00\u59cb\u9884\u6d4b\u540e\uff0c\u8fd9\u91cc\u4f1a\u663e\u793a\u9884\u6d4b\u8fc7\u7a0b\u548c\u4fdd\u5b58\u4f4d\u7f6e\u3002",
+            "track": "\u6682\u65e0\u8fd0\u884c\u65e5\u5fd7\u3002\n\n\u5f00\u59cb\u8ddf\u8e2a\u540e\uff0c\u8fd9\u91cc\u4f1a\u663e\u793a\u8ddf\u8e2a\u8fc7\u7a0b\u548c\u4fdd\u5b58\u4f4d\u7f6e\u3002",
+            "export": "\u6682\u65e0\u8fd0\u884c\u65e5\u5fd7\u3002\n\n\u5f00\u59cb\u5bfc\u51fa\u540e\uff0c\u8fd9\u91cc\u4f1a\u663e\u793a\u5b98\u65b9\u5bfc\u51fa\u8f93\u51fa\u3002",
         }
         self._clear_log_text()
         self.log_text.configure(state="normal")
@@ -3542,6 +3853,92 @@ class App:
         self.process_status_var.set("正在配置内置环境")
         self._start_configure_process(python_path)
 
+    def _handle_annotation_notice(self, message: str) -> None:
+        notice = message.strip()
+        if not notice:
+            return
+        self.left_result_var.set(notice)
+        if self.annotation_editor is not None and self.annotation_editor.project_dir is not None:
+            self.result_location_var.set(str(self.annotation_editor.project_dir))
+        if not self.process or self.process.poll() is not None:
+            self.process_status_var.set("\u624b\u52a8\u6807\u6ce8")
+        self._refresh_summary()
+
+    def start_annotation_auto_label(
+        self,
+        image_dir: Path,
+        image_path: Path | None,
+        model_ref: str,
+        config: dict[str, object],
+        class_names: list[str],
+    ) -> None:
+        python_path = self._ensure_python()
+        if not python_path:
+            return
+
+        weight_ref = model_ref.strip()
+        if not weight_ref:
+            messagebox.showwarning("\u7f3a\u5c11\u6a21\u578b", "\u8bf7\u5148\u9009\u62e9\u6216\u8f93\u5165\u81ea\u52a8\u6807\u6ce8\u6a21\u578b\u3002")
+            return
+
+        payload = dict(config)
+        payload["_project_class_names"] = list(class_names)
+        try:
+            config_path = self._write_temp_json(payload, "yolo_annotate_")
+        except Exception as exc:
+            messagebox.showerror("\u914d\u7f6e\u9519\u8bef", str(exc))
+            return
+
+        command = [
+            python_path,
+            "-u",
+            str(BACKEND),
+            "auto-label-detect",
+            "--weights",
+            weight_ref,
+            "--image-dir",
+            str(image_dir),
+            "--config-json",
+            str(config_path),
+        ]
+        title = "\u5f53\u524d\u56fe\u81ea\u52a8\u6807\u6ce8" if image_path is not None else "\u6279\u91cf\u81ea\u52a8\u6807\u6ce8"
+        preview_path = image_path if image_path is not None else image_dir
+        if image_path is not None:
+            command.extend(["--image", str(image_path)])
+        self._start_process(command, title=title, mode_label="\u81ea\u52a8\u6807\u6ce8", preview_path=preview_path)
+
+    def start_prepare_dataset_from_annotation(self, image_dir: Path, class_names: list[str]) -> None:
+        self.train_task_label_var.set(TASK_ID_TO_LABEL.get("detect", self.train_task_label_var.get()))
+        self.prep_input_var.set(str(image_dir))
+        self.prep_format_var.set("YOLO TXT")
+        self.prep_class_names_file_var.set("")
+        self.prep_class_names_text.delete("1.0", "end")
+        self.prep_class_names_text.insert("1.0", "\n".join(class_names))
+        self._refresh_prep_output_preview()
+        self.start_prepare_dataset()
+
+    def _handle_annotation_dataset_ready(self, task_id: str, target_path: Path, report: Any) -> None:
+        task_label = TASK_ID_TO_LABEL.get(task_id, self.train_task_label_var.get())
+        resolved_target = Path(target_path).expanduser().resolve()
+        self.train_task_label_var.set(task_label)
+        self.train_data_var.set(str(resolved_target))
+        self.last_result_path = resolved_target
+        self.left_result_var.set(f"数据整理完成：{resolved_target}")
+        self.result_location_var.set(str(resolved_target))
+        self.process_status_var.set("数据整理完成")
+        self._open_train_workspace_from_annotation()
+        self._refresh_summary()
+        messagebox.showinfo(
+            "数据整理完成",
+            (
+                f"任务类型：{task_label}\n"
+                f"样本数量：{getattr(report, 'sample_count', '未知')}\n"
+                f"训练集：{getattr(report, 'train_count', '未知')}\n"
+                f"验证集：{getattr(report, 'val_count', '未知')}\n"
+                f"训练入口已自动回填：\n{resolved_target}"
+            ),
+        )
+
     def start_prepare_dataset(self) -> None:
         if self._current_train_task() != "detect":
             messagebox.showwarning("当前任务不支持", "整理原始检测数据仅用于 detect 任务。")
@@ -3740,14 +4137,18 @@ class App:
 
     def _run_current_train_action(self) -> None:
         action = self.train_action_var.get()
-        if action == "train":
+        if action == "annotate":
+            self._show_tab("annotation")
+        elif action == "train":
             self.start_train()
         elif action == "val":
             self.start_val()
         elif action == "predict":
             self.start_predict()
-        else:
+        elif action == "track":
             self.start_track()
+        else:
+            messagebox.showwarning("\u672a\u77e5\u529f\u80fd", f"\u6682\u4e0d\u652f\u6301\u7684\u52a8\u4f5c\uff1a{action}")
 
     def _get_prep_class_names(self) -> str:
         raw_text = self.prep_class_names_text.get("1.0", "end").strip()
@@ -3940,6 +4341,24 @@ class App:
             self._refresh_summary()
             extra = f"\n处理结果数：{count}" if count is not None else ""
             messagebox.showinfo("跟踪完成", f"输出目录：{output_dir}{extra}")
+            return
+
+        if tag == "RESULT" and payload.get("kind") == "auto-label-detect":
+            image_dir = Path(str(payload.get("image_dir"))).expanduser()
+            target_image = str(payload.get("target_image") or "").strip()
+            image_count = payload.get("image_count")
+            box_count = payload.get("box_count")
+            result_path = Path(target_image).expanduser() if target_image else image_dir
+            self.last_result_path = result_path
+            self.left_result_var.set(f"\u81ea\u52a8\u6807\u6ce8\u5b8c\u6210\uff1a{image_dir}")
+            self.result_location_var.set(str(result_path))
+            self.process_status_var.set("\u81ea\u52a8\u6807\u6ce8\u5b8c\u6210")
+            if self.annotation_editor is not None:
+                self.annotation_editor.apply_auto_label_result(payload)
+            self._refresh_summary()
+            scope_text = f"\u5f53\u524d\u56fe\u7247\uff1a{Path(target_image).name}" if target_image else f"\u5904\u7406\u56fe\u7247\u6570\uff1a{image_count}"
+            extra = f"\n\u5199\u5165\u6846\u6570\uff1a{box_count}" if box_count is not None else ""
+            messagebox.showinfo("\u81ea\u52a8\u6807\u6ce8\u5b8c\u6210", f"{scope_text}\n\u6807\u6ce8\u76ee\u5f55\uff1a{image_dir}{extra}")
             return
 
         if tag == "RESULT" and payload.get("kind") == "export":
@@ -4142,7 +4561,7 @@ def main() -> None:
     if len(sys.argv) >= 3 and sys.argv[1] == BACKEND_LAUNCH_FLAG:
         raise SystemExit(run_backend_command_from_launcher(sys.argv[2:]))
 
-    root = tk.Tk()
+    root = create_app_root()
     apply_window_icon(root)
     App(root)
     root.mainloop()

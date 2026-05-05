@@ -39,6 +39,8 @@ root.update()
 assert ui.active_tab.get() == "train"
 assert ui.train_scroll.winfo_ismapped()
 assert not ui.export_scroll.winfo_ismapped()
+assert ui.annotation_page is not None
+assert not ui.annotation_page.winfo_ismapped()
 
 # 环境判定：推荐 CPU 的显卡机器不应反复要求重配
 cpu_recommended_payload = {
@@ -65,12 +67,20 @@ unsupported_payload = {
 assert ui._runtime_needs_configuration(unsupported_payload) is True
 
 # 页签切换 + 滚动复位
+ui._show_tab("annotation")
+root.update_idletasks()
+root.update()
+assert ui.annotation_page.winfo_ismapped()
+assert not ui.train_scroll.winfo_ismapped()
+assert not ui.export_scroll.winfo_ismapped()
+
 ui.train_scroll.canvas.yview_moveto(1.0)
 ui._show_tab("export")
 root.update_idletasks()
 root.update()
 assert ui.export_scroll.winfo_ismapped()
 assert not ui.train_scroll.winfo_ismapped()
+assert not ui.annotation_page.winfo_ismapped()
 assert ui.export_scroll.canvas.yview()[0] == 0.0
 
 ui.export_scroll.canvas.yview_moveto(1.0)

@@ -1,7 +1,8 @@
 param(
     [switch]$Full,
     [switch]$IncludeRuntime,
-    [string]$RuntimeSource
+    [string]$RuntimeSource,
+    [string]$SpecPath = '.\yolo_local_desktop.spec'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -15,7 +16,13 @@ $runtimeCacheFile = Join-Path $project '.runtime_source_path.txt'
 $distRoot = $null
 $appName = $null
 $releaseDir = $null
-$releaseZipPath = Join-Path $releaseRoot 'YOLO_training_tool_release.zip'
+$resolvedSpecPath = [System.IO.Path]::GetFullPath((Join-Path $project $SpecPath))
+$specBaseName = [System.IO.Path]::GetFileNameWithoutExtension($resolvedSpecPath)
+$releaseZipPath = Join-Path $releaseRoot "${specBaseName}_release.zip"
+
+if (-not (Test-Path -LiteralPath $resolvedSpecPath)) {
+    throw "Spec file was not found: $resolvedSpecPath"
+}
 
 function Test-RuntimeDirectory {
     param([string]$PathValue)
@@ -73,7 +80,7 @@ if ($IncludeRuntime) {
     }
 }
 
-$pyInstallerArgs = @('.\yolo_local_desktop.spec', '--noconfirm')
+$pyInstallerArgs = @($resolvedSpecPath, '--noconfirm')
 if ($Full) {
     $pyInstallerArgs += '--clean'
     $env:YOLO_TOOL_BUILD_FAST = '0'
@@ -144,25 +151,12 @@ if (Test-Path -LiteralPath $licenseFile) {
 
 if ($Full) {
     New-Item -ItemType Directory -Force -Path $releaseRoot | Out-Null
-    Get-ChildItem -LiteralPath $releaseRoot -Force -ErrorAction SilentlyContinue |
-        Where-Object {
-            (
-                $_.PSIsContainer -and $_.Name -like 'YOLO*' -and $_.Name -ne $appName
-            ) -or (
-                -not $_.PSIsContainer -and (
-                    $_.Name -like 'YOLO*_share.zip' -or
-                    $_.Name -like 'YOLO*_github_no_runtime.zip' -or
-                    $_.Name -like 'YOLO*_release.zip'
-                ) -and $_.Name -ne (Split-Path -Leaf $releaseZipPath)
-            )
-        } |
-        Remove-Item -Recurse -Force
     if (Test-Path -LiteralPath $releaseDir) {
         Remove-Item -LiteralPath $releaseDir -Recurse -Force
     }
     Copy-Item -LiteralPath $distRoot -Destination $releaseDir -Recurse -Force
 
-    $buildExe = Get-ChildItem -LiteralPath (Join-Path $buildDir 'yolo_local_desktop') -Filter '*.exe' -ErrorAction SilentlyContinue |
+    $buildExe = Get-ChildItem -LiteralPath (Join-Path $buildDir $specBaseName) -Filter '*.exe' -ErrorAction SilentlyContinue |
         Select-Object -First 1 -ExpandProperty FullName
     if ($buildExe) {
         Remove-Item -LiteralPath $buildExe -Force
@@ -175,6 +169,7 @@ if ($Full) {
 }
 
 Write-Host "Build mode: $(if ($Full) { 'full release' } else { 'fast local' })"
+Write-Host "Spec file: $resolvedSpecPath"
 Write-Host "Include runtime: $IncludeRuntime"
 if ($runtimeSourceResolved) {
     Write-Host "Runtime source: $runtimeSourceResolved"

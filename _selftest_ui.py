@@ -15,7 +15,7 @@ app.messagebox.showwarning = lambda *a, **k: None
 app.messagebox.askyesno = lambda *a, **k: True
 
 
-root = tk.Tk()
+root = app.create_app_root()
 root.geometry("1400x980+40+40")
 ui = app.App(root)
 root.update_idletasks()
@@ -28,6 +28,18 @@ assert ui.train_preset_var.get() == ""
 assert ui.train_recommended_preset_var.get() == ""
 assert ui.export_preset_var.get() == ""
 assert ui.export_recommended_preset_var.get() == ""
+
+ui._show_tab("annotation")
+root.update_idletasks()
+root.update()
+assert not ui.left_panel.winfo_ismapped(), "annotation tab should hide the outer summary panel"
+assert int(ui.right_panel.grid_info().get("columnspan", 1)) == 2, "annotation tab should expand to the full content width"
+
+ui._show_tab("train")
+root.update_idletasks()
+root.update()
+assert ui.left_panel.winfo_ismapped(), "train tab should restore the outer summary panel"
+assert int(ui.right_panel.grid_info().get("columnspan", 1)) == 1, "train tab should restore the split layout"
 
 
 def walk(widget):
