@@ -8,6 +8,8 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+from annotation_support import AnnotationBox, ensure_class_names, list_annotation_images, save_class_names, save_yolo_boxes
+
 
 APP_DIR = Path(__file__).resolve().parent
 VENDOR_DIR = APP_DIR / "vendor_backend"
@@ -359,6 +361,113 @@ def run_export(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_auto_label_detect(args: argparse.Namespace) -> int:
+    from PIL import Image
+    from ultralytics import YOLO
+    import yolo_runner
+
+    image_dir = Path(args.image_dir).expanduser().resolve()
+    if not image_dir.exists() or not image_dir.is_dir():
+        raise ValueError(f"找不到图片目录：{image_dir}")
+
+    image_paths = list_annotation_images(image_dir)
+    if not image_paths:
+        raise ValueError(f"{image_dir} 里没有可自动标注的图片。")
+
+    target_image: Path | None = None
+    if args.image:
+        target_image = Path(args.image).expanduser().resolve()
+        if target_image not in image_paths:
+            raise ValueError(f"当前图片不在所选目录里：{target_image}")
+        image_paths = [target_image]
+
+    config_payload = load_json(args.config_json)
+    project_class_names_raw = config_payload.pop("_project_class_names", [])
+    if isinstance(project_class_names_raw, list):
+        project_class_names = [str(item).strip() for item in project_class_names_raw if str(item).strip()]
+    else:
+        project_class_names = []
+    predict_kwargs = yolo_runner.clean_kwargs(config_payload)
+    predict_kwargs.update({"save": False, "verbose": False})
+
+    emit_status("开始自动标注", image_dir=str(image_dir), image_count=len(image_paths), model=args.weights)
+    model = YOLO(args.weights, task="detect")
+
+    updated_files: list[str] = []
+    total_box_count = 0
+    max_detected_class_id = -1
+    for index, image_path in enumerate(image_paths, start=1):
+        emit_status(f"正在自动标注第 {index}/{len(image_paths)} 张图片", image=str(image_path))
+        results = model.predict(source=str(image_path), **predict_kwargs)
+        result = results[0] if results else None
+        boxes: list[AnnotationBox] = []
+        if result is not None and getattr(result, "boxes", None) is not None:
+            for xyxy, class_id in zip(result.boxes.xyxy.tolist(), result.boxes.cls.tolist()):
+                boxes.append(
+                    AnnotationBox(
+                        class_id=int(class_id),
+                        x1=float(xyxy[0]),
+                        y1=float(xyxy[1]),
+                        x2=float(xyxy[2]),
+                        y2=float(xyxy[3]),
+                    )
+                )
+
+        image_width = 0
+        image_height = 0
+        orig_shape = getattr(result, "orig_shape", None) if result is not None else None
+        if isinstance(orig_shape, (list, tuple)) and len(orig_shape) >= 2:
+            image_height = int(orig_shape[0] or 0)
+            image_width = int(orig_shape[1] or 0)
+        if image_width <= 0 or image_height <= 0:
+            with Image.open(image_path) as image:
+                image_width = int(image.width)
+                image_height = int(image.height)
+
+        save_yolo_boxes(image_path.with_suffix(".txt"), boxes, image_width, image_height)
+        updated_files.append(str(image_path))
+        total_box_count += len(boxes)
+        if boxes:
+            max_detected_class_id = max(max_detected_class_id, max(box.class_id for box in boxes))
+
+    model_names = getattr(model, "names", {}) or {}
+    if isinstance(model_names, dict):
+        ordered_names = [str(model_names[key]).strip() for key in sorted(model_names)]
+    elif isinstance(model_names, list):
+        ordered_names = [str(item).strip() for item in model_names]
+    else:
+        ordered_names = []
+    detected_class_count = max_detected_class_id + 1 if max_detected_class_id >= 0 else 0
+    target_class_count = max(len(project_class_names), len(ordered_names), detected_class_count, 1)
+    generic_project_names = bool(project_class_names) and all(name == f"class{index}" for index, name in enumerate(project_class_names))
+
+    if project_class_names and not generic_project_names:
+        final_class_names = list(project_class_names)
+        while len(final_class_names) < target_class_count:
+            index = len(final_class_names)
+            fallback_name = ordered_names[index] if index < len(ordered_names) and ordered_names[index] else f"class{index}"
+            final_class_names.append(fallback_name)
+    else:
+        final_class_names = list(ordered_names or project_class_names or ["class0"])
+
+    final_class_names = ensure_class_names(final_class_names, target_class_count - 1)
+    save_class_names(image_dir, final_class_names)
+
+    emit(
+        "RESULT",
+        {
+            "kind": "auto-label-detect",
+            "image_dir": str(image_dir),
+            "target_image": "" if target_image is None else str(target_image),
+            "image_count": len(updated_files),
+            "box_count": total_box_count,
+            "updated_files": updated_files,
+            "model_class_names": final_class_names,
+        },
+    )
+    return 0
+
+
 def run_prepare_dataset(args: argparse.Namespace) -> int:
     prepare_script = VENDOR_DIR / "prepare_detection_dataset.py"
     command = [
@@ -453,6 +562,11 @@ def build_parser() -> argparse.ArgumentParser:
     export.add_argument("--task", default="")
     export.add_argument("--weights", required=True)
     export.add_argument("--config-json", required=True)
+    auto_label = subparsers.add_parser("auto-label-detect", help="对检测图片目录执行自动标注")
+    auto_label.add_argument("--weights", required=True)
+    auto_label.add_argument("--image-dir", required=True)
+    auto_label.add_argument("--config-json", required=True)
+    auto_label.add_argument("--image", default="")
 
     prep = subparsers.add_parser("prepare-dataset", help="整理检测数据集")
     prep.add_argument("--input", required=True)
@@ -490,6 +604,8 @@ def main(argv: list[str] | None = None) -> int:
             return run_track(args)
         if args.command == "export":
             return run_export(args)
+        if args.command == "auto-label-detect":
+            return run_auto_label_detect(args)
         if args.command == "prepare-dataset":
             return run_prepare_dataset(args)
         parser.error(f"未知命令: {args.command}")

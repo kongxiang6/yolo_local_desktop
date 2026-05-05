@@ -5,7 +5,7 @@ from pathlib import Path
 
 
 project_dir = Path.cwd()
-app_name = "YOLO训练工具"
+app_name = "YOLO训练工具_V2"
 fast_build = (os.environ.get("YOLO_TOOL_BUILD_FAST", "0") == "1")
 
 datas = [
@@ -26,7 +26,7 @@ datas = [
 
 
 a = Analysis(
-    ["app.py"],
+    ["app_v2.py"],
     pathex=[str(project_dir)],
     binaries=[],
     datas=datas,
