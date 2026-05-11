@@ -86,6 +86,44 @@ def _expand_dataset_entry(path: Path) -> list[Path]:
     return []
 
 
+def _label_path_for_image(image_path: Path) -> Path | None:
+    parts = list(image_path.parts)
+    for index in range(len(parts) - 1, -1, -1):
+        if parts[index].lower() == "images":
+            candidate = Path(*parts[:index], "labels", *parts[index + 1 :]).with_suffix(".txt")
+            return candidate
+    return image_path.with_suffix(".txt")
+
+
+def _strip_utf8_bom_from_label_file(label_path: Path) -> bool:
+    try:
+        raw = label_path.read_bytes()
+    except OSError:
+        return False
+    bom = b"\xef\xbb\xbf"
+    if not raw.startswith(bom):
+        return False
+    label_path.write_bytes(raw[len(bom) :])
+    return True
+
+
+def normalize_dataset_label_text_files(image_paths: list[Path]) -> int:
+    cleaned = 0
+    seen: set[Path] = set()
+    for image_path in image_paths:
+        label_path = _label_path_for_image(image_path)
+        if label_path is None:
+            continue
+        label_path = label_path.resolve(strict=False)
+        if label_path in seen or not label_path.exists():
+            continue
+        seen.add(label_path)
+        if _strip_utf8_bom_from_label_file(label_path):
+            label_path.parent.with_suffix(".cache").unlink(missing_ok=True)
+            cleaned += 1
+    return cleaned
+
+
 def _resolve_dataset_entries(entries: list[str], dataset_root: Path) -> list[Path]:
     resolved: list[Path] = []
     for entry in entries:
@@ -142,6 +180,9 @@ def _validate_detection_dataset(data_input: Path, task: str) -> tuple[int, int]:
         raise ValueError("检测类数据集必须使用独立的 train 与 val 路径，不能让 val 指向 train。")
 
     resolved_test = _resolve_dataset_entries(_iter_dataset_entries(payload.get("test")), dataset_root)
+    cleaned_label_count = normalize_dataset_label_text_files([*resolved_train, *resolved_val, *resolved_test])
+    if cleaned_label_count:
+        emit_app_diagnostic(f"已清理 {cleaned_label_count} 个标签文件开头的 UTF-8 BOM，避免训练读取类别 ID 失败。")
     image_count = len({*resolved_train, *resolved_val, *resolved_test})
     return image_count, len(resolved_val)
 

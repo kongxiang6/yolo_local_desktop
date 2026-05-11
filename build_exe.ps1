@@ -1,4 +1,4 @@
-param(
+﻿param(
     [switch]$Full,
     [switch]$IncludeRuntime,
     [string]$RuntimeSource,
@@ -19,6 +19,11 @@ $releaseDir = $null
 $resolvedSpecPath = [System.IO.Path]::GetFullPath((Join-Path $project $SpecPath))
 $specBaseName = [System.IO.Path]::GetFileNameWithoutExtension($resolvedSpecPath)
 $releaseZipPath = Join-Path $releaseRoot "${specBaseName}_release.zip"
+$expectedDistName = $null
+switch ($specBaseName) {
+    'yolo_local_desktop' { $expectedDistName = 'YOLO训练工具' }
+    'yolo_local_desktop_v2' { $expectedDistName = 'YOLO训练工具_V2' }
+}
 
 if (-not (Test-Path -LiteralPath $resolvedSpecPath)) {
     throw "Spec file was not found: $resolvedSpecPath"
@@ -89,22 +94,30 @@ else {
     $env:YOLO_TOOL_BUILD_FAST = '1'
 }
 
+$env:PYINSTALLER_CONFIG_DIR = Join-Path $project '.pyinstaller_cache'
 python -m PyInstaller @pyInstallerArgs
+if ($LASTEXITCODE -ne 0) {
+    throw "PyInstaller failed with exit code $LASTEXITCODE"
+}
 
-$distRoot = Get-ChildItem -LiteralPath $distRootParent -Directory -ErrorAction SilentlyContinue |
-    Sort-Object LastWriteTime -Descending |
-    Select-Object -First 1 -ExpandProperty FullName
+if ($expectedDistName) {
+    $distRoot = Join-Path $distRootParent $expectedDistName
+}
+if (-not $distRoot -or -not (Test-Path -LiteralPath $distRoot)) {
+    $distRoot = Get-ChildItem -LiteralPath $distRootParent -Directory -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime -Descending |
+        Select-Object -First 1 -ExpandProperty FullName
+}
 if (-not $distRoot -or -not (Test-Path -LiteralPath $distRoot)) {
     throw 'PyInstaller did not produce the expected dist directory.'
 }
 $appName = Split-Path -Leaf $distRoot
 $releaseDir = Join-Path $releaseRoot $appName
 
-New-Item -ItemType Directory -Force -Path (Join-Path $distRoot 'presets\train') | Out-Null
-New-Item -ItemType Directory -Force -Path (Join-Path $distRoot 'presets\val') | Out-Null
-New-Item -ItemType Directory -Force -Path (Join-Path $distRoot 'presets\predict') | Out-Null
-New-Item -ItemType Directory -Force -Path (Join-Path $distRoot 'presets\track') | Out-Null
-New-Item -ItemType Directory -Force -Path (Join-Path $distRoot 'presets\export') | Out-Null
+$distPresets = Join-Path $distRoot 'presets'
+if (Test-Path -LiteralPath $distPresets) {
+    Remove-Item -LiteralPath $distPresets -Recurse -Force
+}
 
 $distRuntime = Join-Path $distRoot 'runtime'
 if (Test-Path -LiteralPath $distRuntime) {
@@ -140,7 +153,7 @@ if ($IncludeRuntime -and -not (Test-Path -LiteralPath (Join-Path $distRuntime 'p
 if (Test-Path -LiteralPath (Join-Path $deliveryDir 'README_FOR_SHARE.txt')) {
     Copy-Item -LiteralPath (Join-Path $deliveryDir 'README_FOR_SHARE.txt') -Destination (Join-Path $distRoot 'README_FOR_SHARE.txt') -Force
 }
-$localGuide = Join-Path $project 'USER_GUIDE.txt'
+$localGuide = Join-Path $project 'YOLO训练工具操作说明.txt'
 if (Test-Path -LiteralPath $localGuide) {
     Copy-Item -LiteralPath $localGuide -Destination (Join-Path $distRoot (Split-Path $localGuide -Leaf)) -Force
 }
@@ -163,7 +176,13 @@ if ($Full) {
     }
 
     if (Test-Path -LiteralPath $releaseZipPath) {
-        Remove-Item -LiteralPath $releaseZipPath -Force
+        try {
+            Remove-Item -LiteralPath $releaseZipPath -Force
+        }
+        catch {
+            $lockedBackup = Join-Path $releaseRoot ("{0}.locked.{1}.zip" -f $specBaseName, (Get-Date -Format 'yyyyMMdd_HHmmss'))
+            Move-Item -LiteralPath $releaseZipPath -Destination $lockedBackup -Force
+        }
     }
     Compress-Archive -Path $releaseDir -DestinationPath $releaseZipPath
 }

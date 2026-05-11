@@ -28,6 +28,19 @@ assert ui.train_preset_var.get() == ""
 assert ui.train_recommended_preset_var.get() == ""
 assert ui.export_preset_var.get() == ""
 assert ui.export_recommended_preset_var.get() == ""
+root.geometry("1400x980+40+40")
+root.update_idletasks()
+root.update()
+assert int(ui.log_text.cget("height")) >= app.LOG_TEXT_DEFAULT_HEIGHT
+root.geometry("1280x720+40+40")
+root.update_idletasks()
+root.update()
+assert int(ui.log_text.cget("height")) >= app.LOG_TEXT_COMPACT_HEIGHT
+if root.winfo_height() <= app.COMPACT_LAYOUT_HEIGHT:
+    assert int(ui.log_text.cget("height")) < app.LOG_TEXT_DEFAULT_HEIGHT
+root.geometry("1400x980+40+40")
+root.update_idletasks()
+root.update()
 
 ui._show_tab("annotation")
 root.update_idletasks()
@@ -70,6 +83,20 @@ assert not preset_path.exists(), "custom preset not deleted"
 visible_combo = next(w for w in walk(root) if isinstance(w, app.SmartComboBox) and w.winfo_ismapped())
 owner_scroll = visible_combo._find_scrollable_parent()
 assert owner_scroll is not None, "visible combo has no scrollable parent"
+
+# 根窗口 Configure 只处理真正的根窗口几何变化，避免移动窗口时重复触发无意义 UI 刷新
+visible_combo.open_popup()
+root.update_idletasks()
+root.update()
+assert visible_combo.popup is not None, "popup did not open before root configure test"
+app.SmartComboBox._last_root_geometry = "1400x980+40+40"
+app.SmartComboBox._handle_root_configure(SimpleNamespace(widget=root, width=1400, height=980, x=40, y=40))
+assert visible_combo.popup is not None, "unchanged root geometry should not close popup"
+app.SmartComboBox._handle_root_configure(SimpleNamespace(widget=visible_combo, width=320, height=42, x=0, y=0))
+assert visible_combo.popup is not None, "child configure should not close popup"
+app.SmartComboBox._handle_root_configure(SimpleNamespace(widget=root, width=1400, height=980, x=41, y=40))
+assert visible_combo.popup is None, "root move/resize should close popup once"
+
 visible_combo.open_popup()
 root.update_idletasks()
 root.update()

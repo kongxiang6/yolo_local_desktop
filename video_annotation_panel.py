@@ -10,6 +10,8 @@ from pathlib import Path
 from tkinter import filedialog, messagebox
 from typing import Callable
 
+from annotation_ui_support import VerticalScrolledFrame
+
 
 CARD_BG = "#ffffff"
 CARD_SOFT = "#fbfdff"
@@ -155,6 +157,7 @@ class VideoAnnotationPanel(tk.Frame):
 
     def _build_ui(self) -> None:
         self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(1, weight=1)
 
         header = tk.Frame(self, bg=PANEL_BG, highlightbackground=BORDER, highlightthickness=1)
         header.grid(row=0, column=0, sticky="ew", padx=10, pady=10)
@@ -171,8 +174,9 @@ class VideoAnnotationPanel(tk.Frame):
             font=("Microsoft YaHei UI", 10),
         ).grid(row=1, column=0, sticky="ew", padx=14, pady=(0, 12))
 
-        body = tk.Frame(self, bg=CARD_BG)
-        body.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 10))
+        self.body_scroll = VerticalScrolledFrame(self, bg=CARD_BG)
+        self.body_scroll.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 10))
+        body = self.body_scroll.content
         body.grid_columnconfigure(0, weight=1)
         body.grid_columnconfigure(1, weight=1)
 

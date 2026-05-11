@@ -51,7 +51,6 @@ class VerticalScrolledFrame(tk.Frame):
                 return current
             current = getattr(current, "master", None)
         return None
-
     def _ensure_global_mousewheel_binding(self) -> None:
         root = self.winfo_toplevel()
         bound_root = VerticalScrolledFrame._bound_root
@@ -97,7 +96,10 @@ class VerticalScrolledFrame(tk.Frame):
         self.canvas.itemconfigure(self.window_id, width=event.width)
 
     def _on_mousewheel(self, event: tk.Event) -> str | None:
-        if VerticalScrolledFrame._active_instance not in {None, self}:
+        resolved = self._resolve_from_widget(getattr(event, "widget", None))
+        if resolved not in {None, self}:
+            return None
+        if VerticalScrolledFrame._active_instance not in {None, self} and resolved is None:
             return None
         if not self.winfo_ismapped():
             return None

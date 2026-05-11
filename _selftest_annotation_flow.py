@@ -1,3 +1,4 @@
+import json
 import sys
 import tempfile
 import tkinter as tk
@@ -130,6 +131,49 @@ with tempfile.TemporaryDirectory() as tmp:
     )
     assert editor.class_names == ["custom0", "car", "bus"]
     assert (tmp_path / "classes.txt").read_text(encoding="utf-8").splitlines() == ["custom0", "car", "bus"]
+
+    labelme_dir = tmp_path / "labelme_src"
+    labelme_dir.mkdir()
+    labelme_image = labelme_dir / "labelme_sample.png"
+    labelme_json = labelme_dir / "labelme_sample.json"
+    Image.new("RGB", (100, 80), color=(250, 250, 250)).save(labelme_image)
+    labelme_json.write_text(
+        json.dumps(
+            {
+                "version": "5.0.0",
+                "imagePath": labelme_image.name,
+                "imageHeight": 80,
+                "imageWidth": 100,
+                "shapes": [
+                    {
+                        "label": "head",
+                        "points": [[10, 12], [60, 50]],
+                        "shape_type": "rectangle",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    editor.load_project(labelme_dir)
+    assert editor.current_image_count() == 1
+    assert editor.current_image_name() == "labelme_sample.png"
+    assert editor.class_names == ["head"]
+    assert len(editor.boxes) == 1
+    assert editor.boxes[0].class_id == 0
+    assert editor.boxes[0].x1 == 10
+    assert editor.boxes[0].y1 == 12
+    editor.save_current_annotations(silent=True)
+    labelme_txt = labelme_dir / "labelme_sample.txt"
+    assert labelme_txt.exists()
+    assert labelme_json.exists()
+    assert labelme_txt.read_text(encoding="utf-8").strip().startswith("0 ")
+
+    editor.boxes = []
+    editor.save_current_annotations(silent=True)
+    editor.load_project(labelme_dir)
+    assert editor.boxes == []
 
     root.destroy()
 

@@ -44,9 +44,18 @@ def desktop_protocol_enabled() -> bool:
     return str(os.environ.get("YOLO_DESKTOP_PROTOCOL") or "").strip() == "1"
 
 
+def safe_print(text: str, *, file=None) -> None:
+    try:
+        print(text, file=file, flush=True)
+    except (OSError, ValueError):
+        # Windowed PyInstaller backend commands can be launched without a
+        # valid console handle. Reporting must not make the actual operation fail.
+        pass
+
+
 def emit_json(tag: str, payload: dict) -> None:
     if desktop_protocol_enabled():
-        print(f"[{tag}] {json.dumps(payload, ensure_ascii=False)}", flush=True)
+        safe_print(f"[{tag}] {json.dumps(payload, ensure_ascii=False)}")
 
 
 def parse_args() -> argparse.Namespace:
@@ -127,7 +136,7 @@ def iter_flat_txt(root: Path) -> list[Path]:
 
 
 def read_text_lines(path: Path) -> list[str]:
-    return [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    return [line.strip() for line in path.read_text(encoding="utf-8-sig").splitlines() if line.strip()]
 
 
 def normalize_class_names(values: Iterable[str]) -> list[str]:
@@ -142,7 +151,7 @@ def normalize_class_names(values: Iterable[str]) -> list[str]:
 def load_class_names_from_file(path: Path) -> list[str]:
     suffix = path.suffix.lower()
     if suffix in {".yaml", ".yml", ".json"}:
-        payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+        payload = yaml.safe_load(path.read_text(encoding="utf-8-sig"))
         if isinstance(payload, dict) and "names" in payload:
             payload = payload["names"]
         if isinstance(payload, dict):
@@ -167,7 +176,7 @@ def resolve_explicit_class_names(args: argparse.Namespace, input_root: Path) -> 
 
 def load_json_payload(path: Path) -> dict | None:
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
     except Exception:
         return None
     return payload if isinstance(payload, dict) else None
@@ -210,7 +219,7 @@ def detect_dataset_format(root: Path, requested: str) -> str:
 def validate_yolo_label_lines(label_path: Path) -> tuple[list[str], set[int]]:
     lines: list[str] = []
     used_class_ids: set[int] = set()
-    for line_number, raw_line in enumerate(label_path.read_text(encoding="utf-8").splitlines(), start=1):
+    for line_number, raw_line in enumerate(label_path.read_text(encoding="utf-8-sig").splitlines(), start=1):
         stripped = raw_line.strip()
         if not stripped:
             continue
@@ -799,19 +808,19 @@ def validate_generated_dataset(dataset_yaml: Path) -> None:
 
 
 def emit_report(report: PreparationReport, train_count: int, val_count: int, dataset_yaml: Path, output_root: Path) -> None:
-    print(f"整理后的数据格式：{report.dataset_format}")
-    print(f"输出目录：{output_root}")
-    print(f"生成的 dataset.yaml：{dataset_yaml}")
-    print(f"类别顺序：{report.class_names}")
-    print(f"样本数量：总计={len(report.samples)}，train={train_count}，val={val_count}")
-    print(f"标注框数量：{report.label_count}")
+    safe_print(f"整理后的数据格式：{report.dataset_format}")
+    safe_print(f"输出目录：{output_root}")
+    safe_print(f"生成的 dataset.yaml：{dataset_yaml}")
+    safe_print(f"类别顺序：{report.class_names}")
+    safe_print(f"样本数量：总计={len(report.samples)}，train={train_count}，val={val_count}")
+    safe_print(f"标注框数量：{report.label_count}")
     if report.used_class_ids:
-        print(f"使用到的类别 ID：{sorted(report.used_class_ids)}")
+        safe_print(f"使用到的类别 ID：{sorted(report.used_class_ids)}")
     else:
-        print("使用到的类别 ID：[]")
+        safe_print("使用到的类别 ID：[]")
 
     for warning in report.warnings:
-        print(f"警告：{warning}", file=sys.stderr)
+        safe_print(f"警告：{warning}", file=sys.stderr)
 
     emit_json(
         DATASET_PREP_TAG,
@@ -827,8 +836,7 @@ def emit_report(report: PreparationReport, train_count: int, val_count: int, dat
     )
 
 
-def run() -> int:
-    args = parse_args()
+def run_from_args(args: argparse.Namespace) -> int:
     input_root = Path(args.input).expanduser().resolve()
     output_root = Path(args.output).expanduser().resolve()
 
@@ -865,11 +873,15 @@ def run() -> int:
     return 0
 
 
+def run() -> int:
+    return run_from_args(parse_args())
+
+
 def main() -> int:
     try:
         return run()
     except Exception as exc:
-        print(f"错误：{exc}", file=sys.stderr)
+        safe_print(f"错误：{exc}", file=sys.stderr)
         return 1
 
 

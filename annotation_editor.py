@@ -11,9 +11,11 @@ from annotation_support import (
     AnnotationBox,
     classes_path_for_folder,
     ensure_class_names,
+    labelme_path_for_image,
     label_path_for_image,
     list_project_annotation_images,
     load_class_names,
+    load_labelme_rectangle_boxes,
     load_project_session,
     load_yolo_boxes,
     parse_class_names_text,
@@ -425,7 +427,7 @@ class DetectionAnnotationEditor(tk.Frame):
 
         canvas_panel = tk.Frame(center, bg=CARD_BG, highlightbackground=BORDER, highlightthickness=1)
         canvas_panel.grid(row=0, column=0, sticky="nsew")
-        canvas_panel.grid_rowconfigure(1, weight=1)
+        canvas_panel.grid_rowconfigure(2, weight=1)
         canvas_panel.grid_columnconfigure(0, weight=1)
 
         canvas_toolbar = tk.Frame(canvas_panel, bg=CARD_BG)
@@ -445,6 +447,11 @@ class DetectionAnnotationEditor(tk.Frame):
             font=("Microsoft YaHei UI", 10),
         ).pack(side="right")
 
+        self._v2_shortcut_strip(
+            canvas_panel,
+            ("左键拖拽画框", "编辑模式拖动边角", "Delete 删除选中", "Ctrl+S 保存"),
+        ).grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 8))
+
         self.canvas = tk.Canvas(
             canvas_panel,
             bg="#edf4ff",
@@ -453,17 +460,19 @@ class DetectionAnnotationEditor(tk.Frame):
             relief="flat",
             cursor="crosshair",
         )
-        self.canvas.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 10))
+        self.canvas.grid(row=2, column=0, sticky="nsew", padx=10, pady=(0, 10))
         self.canvas.bind("<Configure>", lambda _event: self.redraw_canvas())
         self.canvas.bind("<ButtonPress-1>", self.on_canvas_press)
         self.canvas.bind("<B1-Motion>", self.on_canvas_drag)
         self.canvas.bind("<ButtonRelease-1>", self.on_canvas_release)
         self.canvas.bind("<Delete>", lambda _event: self.delete_selected_box())
         self.canvas.bind("<BackSpace>", lambda _event: self.delete_selected_box())
+        self.canvas.bind("<Control-s>", lambda _event: self.save_current_annotations())
 
         filmstrip = tk.Frame(center, bg=CARD_BG, highlightbackground=BORDER, highlightthickness=1)
         filmstrip.grid(row=1, column=0, sticky="ew", pady=(8, 0))
         filmstrip.grid_columnconfigure(1, weight=1)
+        self.v2_filmstrip = filmstrip
 
         tk.Label(
             filmstrip,
@@ -640,6 +649,20 @@ class DetectionAnnotationEditor(tk.Frame):
         self._set_v2_tool_button_state(getattr(self, "v2_draw_button", None), selected=self.draw_mode_var.get())
         self._set_v2_tool_button_state(getattr(self, "v2_edit_button", None), selected=not self.draw_mode_var.get())
 
+    def _v2_shortcut_strip(self, parent: tk.Widget, hints: tuple[str, ...]) -> tk.Frame:
+        strip = tk.Frame(parent, bg="#f8fbff", highlightbackground=BORDER, highlightthickness=1)
+        for index, hint in enumerate(hints):
+            tk.Label(
+                strip,
+                text=hint,
+                bg="#f8fbff",
+                fg=TEXT_MUTED,
+                font=("Microsoft YaHei UI", 9, "bold"),
+                padx=10,
+                pady=5,
+            ).pack(side="left", padx=(0, 4) if index < len(hints) - 1 else 0)
+        return strip
+
     def _bind_thumbnail_mousewheel_target(self, widget: tk.Widget) -> None:
         widget.bind("<MouseWheel>", self._on_thumbnail_mousewheel, add="+")
         widget.bind("<Shift-MouseWheel>", self._on_thumbnail_mousewheel, add="+")
@@ -673,7 +696,7 @@ class DetectionAnnotationEditor(tk.Frame):
 
         tk.Label(
             header,
-            text="椤圭洰璺緞",
+            text="图片目录",
             bg=CARD_BG,
             fg=TEXT_MUTED,
             font=("Microsoft YaHei UI", 10, "bold"),
@@ -692,19 +715,19 @@ class DetectionAnnotationEditor(tk.Frame):
             state="readonly",
             font=("Microsoft YaHei UI", 10),
         ).grid(row=0, column=1, sticky="ew", pady=(14, 8), ipady=8)
-        self._small_button(header, "閫夋嫨鏂囦欢澶?", self.pick_project_dir).grid(row=0, column=2, padx=10, pady=(14, 8))
+        self._small_button(header, "选择文件夹", self.pick_project_dir).grid(row=0, column=2, padx=10, pady=(14, 8))
 
         top_actions = tk.Frame(header, bg=CARD_BG)
         top_actions.grid(row=0, column=3, sticky="e", padx=(10, 16), pady=(14, 8))
-        self._small_button(top_actions, "鍒锋柊", self.reload_project).pack(side="left", padx=(0, 8))
-        self._small_button(top_actions, "涓婁竴寮?", self.prev_image).pack(side="left", padx=(0, 8))
-        self._small_button(top_actions, "涓嬩竴寮?", self.next_image).pack(side="left", padx=(0, 8))
-        self._primary_button(top_actions, "淇濆瓨鏍囨敞", self.save_current_annotations).pack(side="left", padx=(0, 8))
-        self._primary_button(top_actions, "AI 鑷姩鏍囨敞", self.auto_label_current).pack(side="left")
+        self._small_button(top_actions, "刷新", self.reload_project).pack(side="left", padx=(0, 8))
+        self._small_button(top_actions, "上一张", self.prev_image).pack(side="left", padx=(0, 8))
+        self._small_button(top_actions, "下一张", self.next_image).pack(side="left", padx=(0, 8))
+        self._primary_button(top_actions, "保存标注", self.save_current_annotations).pack(side="left", padx=(0, 8))
+        self._primary_button(top_actions, "AI 自动标注", self.auto_label_current).pack(side="left")
 
         tk.Label(
             header,
-            text="褰撳墠鍥剧墖",
+            text="当前图片",
             bg=CARD_BG,
             fg=TEXT_MUTED,
             font=("Microsoft YaHei UI", 10, "bold"),
@@ -746,7 +769,7 @@ class DetectionAnnotationEditor(tk.Frame):
         ).pack(side="left", padx=(0, 10))
         tk.Label(
             image_meta,
-            text="鑷姩淇濆瓨宸插惎鐢?",
+            text="自动保存已启用",
             bg="#ebfbf4",
             fg=SUCCESS,
             font=("Microsoft YaHei UI", 10, "bold"),
@@ -764,18 +787,18 @@ class DetectionAnnotationEditor(tk.Frame):
         toolrail.grid(row=0, column=0, sticky="ns", padx=(0, 10))
         tk.Label(
             toolrail,
-            text="宸ュ叿",
+            text="工具",
             bg=CARD_BG,
             fg=TEXT_MUTED,
             font=("Microsoft YaHei UI", 9, "bold"),
         ).pack(anchor="w", padx=14, pady=(14, 12))
-        self._v2_tool_button(toolrail, "妗嗛€夋ā寮?", lambda: self._set_draw_mode(True), selected=True).pack(fill="x", padx=10, pady=(0, 8))
-        self._v2_tool_button(toolrail, "缂栬緫妯″紡", lambda: self._set_draw_mode(False)).pack(fill="x", padx=10, pady=(0, 8))
-        self._v2_tool_button(toolrail, "鍒犻櫎閫変腑", self.delete_selected_box).pack(fill="x", padx=10, pady=(0, 8))
-        self._v2_tool_button(toolrail, "涓婁竴寮?", self.prev_image).pack(fill="x", padx=10, pady=(0, 8))
-        self._v2_tool_button(toolrail, "涓嬩竴寮?", self.next_image).pack(fill="x", padx=10, pady=(0, 8))
-        self._v2_tool_button(toolrail, "淇濆瓨", self.save_current_annotations).pack(fill="x", padx=10, pady=(0, 8))
-        self._v2_tool_button(toolrail, "鎵撳寘璁粌闆?", self.export_training_dataset, primary=True).pack(fill="x", padx=10, pady=(8, 14))
+        self._v2_tool_button(toolrail, "框选模式", lambda: self._set_draw_mode(True), selected=True).pack(fill="x", padx=10, pady=(0, 8))
+        self._v2_tool_button(toolrail, "编辑模式", lambda: self._set_draw_mode(False)).pack(fill="x", padx=10, pady=(0, 8))
+        self._v2_tool_button(toolrail, "删除选中", self.delete_selected_box).pack(fill="x", padx=10, pady=(0, 8))
+        self._v2_tool_button(toolrail, "上一张", self.prev_image).pack(fill="x", padx=10, pady=(0, 8))
+        self._v2_tool_button(toolrail, "下一张", self.next_image).pack(fill="x", padx=10, pady=(0, 8))
+        self._v2_tool_button(toolrail, "保存", self.save_current_annotations).pack(fill="x", padx=10, pady=(0, 8))
+        self._v2_tool_button(toolrail, "打包训练集", self.export_training_dataset, primary=True).pack(fill="x", padx=10, pady=(8, 14))
 
         center = tk.Frame(body, bg="#f5f8fe")
         center.grid(row=0, column=1, sticky="nsew")
@@ -791,7 +814,7 @@ class DetectionAnnotationEditor(tk.Frame):
         canvas_toolbar.grid(row=0, column=0, sticky="ew", padx=14, pady=(14, 10))
         tk.Label(
             canvas_toolbar,
-            text="妫€娴嬫爣娉ㄧ敾甯?",
+            text="检测标注画布",
             bg=CARD_BG,
             fg=TEXT,
             font=("Microsoft YaHei UI", 14, "bold"),
@@ -833,7 +856,7 @@ class DetectionAnnotationEditor(tk.Frame):
         ).grid(row=0, column=0, sticky="w", padx=14, pady=(12, 6))
         tk.Label(
             filmstrip,
-            text="鍙偣鍑婚瑙堝浘蹇€熷垏鎹㈠綋鍓嶅浘鐗?",
+            text="点击缩略图可切换当前图片。",
             bg=CARD_BG,
             fg=TEXT_MUTED,
             font=("Microsoft YaHei UI", 9),
@@ -869,7 +892,7 @@ class DetectionAnnotationEditor(tk.Frame):
         side.configure(bg="#f5f8fe")
         side.grid_columnconfigure(0, weight=1)
 
-        self.classes_box = self._v2_side_box(side, "绫诲埆鍒楄〃", "鍙充晶鍙互鐩存帴缁存姢 classes.txt")
+        self.classes_box = self._v2_side_box(side, "类别列表", "右侧可以直接维护 classes.txt")
         self.classes_box.grid(row=0, column=0, sticky="ew", pady=(0, 10))
         self.class_summary_frame = tk.Frame(self.classes_box, bg=CARD_BG)
         self.class_summary_frame.pack(fill="x", padx=12, pady=(12, 6))
@@ -890,10 +913,10 @@ class DetectionAnnotationEditor(tk.Frame):
         self.class_text.insert("1.0", "class0")
         class_actions = tk.Frame(self.classes_box, bg=CARD_BG)
         class_actions.pack(fill="x", padx=12, pady=(0, 12))
-        self._small_button(class_actions, "淇濆瓨绫诲埆", self.apply_class_names).pack(side="left")
-        self._small_button(class_actions, "杞埌璁粌", self.on_switch_to_train).pack(side="right")
+        self._small_button(class_actions, "保存类别", self.apply_class_names).pack(side="left")
+        self._small_button(class_actions, "转到训练", self.on_switch_to_train).pack(side="right")
 
-        self.box_box = self._v2_side_box(side, "Box List", "Select a box to review class and coordinates.")
+        self.box_box = self._v2_side_box(side, "框列表", "选择一个框来查看类别和坐标。")
         self.box_box.grid(row=1, column=0, sticky="ew", pady=(0, 10))
         tk.Label(
             self.box_box,
@@ -930,7 +953,7 @@ class DetectionAnnotationEditor(tk.Frame):
         self.box_list.bind("<<ListboxSelect>>", self.on_box_selected)
         class_pick_row = tk.Frame(self.box_box, bg=CARD_BG)
         class_pick_row.pack(fill="x", padx=12, pady=(0, 12))
-        tk.Label(class_pick_row, text="绫诲埆", bg=CARD_BG, fg=TEXT_MUTED, font=("Microsoft YaHei UI", 10)).pack(side="left")
+        tk.Label(class_pick_row, text="类别", bg=CARD_BG, fg=TEXT_MUTED, font=("Microsoft YaHei UI", 10)).pack(side="left")
         self.selected_class_combo = ttk.Combobox(
             class_pick_row,
             textvariable=self.selected_class_var,
@@ -941,17 +964,17 @@ class DetectionAnnotationEditor(tk.Frame):
         self.selected_class_combo.pack(side="right", fill="x", expand=True, padx=(10, 0))
         self.selected_class_combo.bind("<<ComboboxSelected>>", self.on_selected_class_changed, add="+")
 
-        self.auto_box = self._v2_side_box(side, "AI 鑷姩鏍囨敞", "鏃㈠彲瀵瑰崟寮犲浘锛屼篃鍙鏁翠釜鐩綍鎵归噺杩愯")
+        self.auto_box = self._v2_side_box(side, "AI 自动标注", "既可对单张图片运行，也可对整个目录批量运行")
         self.auto_box.grid(row=2, column=0, sticky="ew", pady=(0, 10))
         auto_grid = tk.Frame(self.auto_box, bg=CARD_BG)
         auto_grid.pack(fill="x")
-        self._labeled_entry(auto_grid, "妯″瀷", self.auto_model_var, row=0, readonly=False)
+        self._labeled_entry(auto_grid, "模型", self.auto_model_var, row=0, readonly=False)
         browse_row = tk.Frame(auto_grid, bg=CARD_BG)
         browse_row.grid(row=1, column=0, columnspan=2, sticky="ew", padx=12, pady=(0, 8))
         browse_row.grid_columnconfigure(0, weight=1)
         browse_row.grid_columnconfigure(1, weight=1)
-        self._small_button(browse_row, "娴忚鏈湴鏉冮噸", self.pick_auto_model).grid(row=0, column=0, sticky="ew")
-        self._small_button(browse_row, "浣跨敤瀹樻柟妯″瀷", self.use_default_auto_model).grid(row=0, column=1, sticky="ew", padx=(8, 0))
+        self._small_button(browse_row, "浏览本地权重", self.pick_auto_model).grid(row=0, column=0, sticky="ew")
+        self._small_button(browse_row, "使用官方模型", self.use_default_auto_model).grid(row=0, column=1, sticky="ew", padx=(8, 0))
         self._labeled_entry(auto_grid, "conf", self.auto_conf_var, row=2, readonly=False)
         self._labeled_entry(auto_grid, "iou", self.auto_iou_var, row=3, readonly=False)
         self._labeled_entry(auto_grid, "imgsz", self.auto_imgsz_var, row=4, readonly=False)
@@ -960,22 +983,22 @@ class DetectionAnnotationEditor(tk.Frame):
         auto_actions.grid(row=6, column=0, columnspan=2, sticky="ew", padx=12, pady=(4, 12))
         auto_actions.grid_columnconfigure(0, weight=1)
         auto_actions.grid_columnconfigure(1, weight=1)
-        self._primary_button(auto_actions, "褰撳墠鍥剧墖", self.auto_label_current).grid(row=0, column=0, sticky="ew", padx=(0, 4))
-        self._primary_button(auto_actions, "鏁翠釜鐩綍", self.auto_label_all).grid(row=0, column=1, sticky="ew", padx=(4, 0))
+        self._primary_button(auto_actions, "当前图片", self.auto_label_current).grid(row=0, column=0, sticky="ew", padx=(0, 4))
+        self._primary_button(auto_actions, "整个目录", self.auto_label_all).grid(row=0, column=1, sticky="ew", padx=(4, 0))
 
-        self.export_box = self._v2_side_box(side, "鏁寸悊涓鸿缁冮泦", "浼氫繚鐣欏綋鍓嶇被鍒〃骞剁敓鎴?dataset.yaml")
+        self.export_box = self._v2_side_box(side, "整理为训练集", "会保留当前类别表并生成 dataset.yaml")
         self.export_box.grid(row=3, column=0, sticky="ew")
         tk.Label(
             self.export_box,
-            text="浠庡綋鍓嶆爣娉ㄩ」鐩洿鎺ョ敓鎴愬彲璁粌鏁版嵁闆嗭紝鍚屾椂鎶婄粨鏋滄帹閫佺粰璁粌椤点€?",
+            text="从当前标注项目直接生成可训练数据集，同时把结果推送给训练页。",
             bg=CARD_BG,
             fg=TEXT_MUTED,
             justify="left",
             wraplength=276,
             font=("Microsoft YaHei UI", 10),
         ).pack(fill="x", padx=12, pady=(12, 8))
-        self._primary_button(self.export_box, "鏁寸悊骞跺鍑?", self.export_training_dataset).pack(fill="x", padx=12, pady=(0, 8))
-        self._small_button(self.export_box, "鍒囨崲鍒拌缁冨伐浣滃彴", self.on_switch_to_train).pack(fill="x", padx=12, pady=(0, 12))
+        self._primary_button(self.export_box, "整理并导出", self.export_training_dataset).pack(fill="x", padx=12, pady=(0, 8))
+        self._small_button(self.export_box, "切换到训练工作台", self.on_switch_to_train).pack(fill="x", padx=12, pady=(0, 12))
 
         self._apply_v2_text_overrides()
 
@@ -995,11 +1018,11 @@ class DetectionAnnotationEditor(tk.Frame):
         header_children = header.winfo_children()
         open_folder_button = next((child for child in header_children if child.winfo_class() == "Button"), None)
         if open_folder_button is not None:
-            open_folder_button.configure(text="Open Folder")
+            open_folder_button.configure(text="打开目录")
 
         top_actions = next((child for child in header_children if child.winfo_class() == "Frame"), None)
         if top_actions is not None:
-            action_labels = ["Reload", "Prev Image", "Next Image", "Save", "AI Auto Label"]
+            action_labels = ["刷新", "上一张", "下一张", "保存", "AI 自动标注"]
             for button, label in zip(top_actions.winfo_children(), action_labels):
                 button.configure(text=label)
 
@@ -1007,7 +1030,7 @@ class DetectionAnnotationEditor(tk.Frame):
         if len(meta_frames) > 1:
             meta_labels = meta_frames[1].winfo_children()
             if len(meta_labels) >= 3:
-                meta_labels[2].configure(text="Auto save enabled")
+                meta_labels[2].configure(text="自动保存已启用")
 
         body_children = body.winfo_children()
         if len(body_children) >= 2:
@@ -1015,8 +1038,8 @@ class DetectionAnnotationEditor(tk.Frame):
             center = body_children[1]
             tool_children = toolrail.winfo_children()
             if tool_children:
-                tool_children[0].configure(text="Tools")
-                tool_labels = ["Draw Box", "Edit Box", "Delete Selected", "Prev Image", "Next Image", "Save", "Export Dataset"]
+                tool_children[0].configure(text="工具")
+                tool_labels = ["框选模式", "编辑模式", "删除选中", "上一张", "下一张", "保存", "导出数据集"]
                 for button, label in zip(tool_children[1:], tool_labels):
                     button.configure(text=label)
 
@@ -1025,58 +1048,58 @@ class DetectionAnnotationEditor(tk.Frame):
                 canvas_panel = center_children[0]
                 filmstrip = center_children[1]
                 canvas_toolbar = canvas_panel.winfo_children()[0]
-                canvas_toolbar.winfo_children()[0].configure(text="Detection Canvas")
+                canvas_toolbar.winfo_children()[0].configure(text="检测标注画布")
                 filmstrip_children = filmstrip.winfo_children()
                 if len(filmstrip_children) >= 2:
-                    filmstrip_children[1].configure(text="Click a preview to switch the current image.")
+                    filmstrip_children[1].configure(text="点击缩略图可切换当前图片。")
 
         side_children = self.sidebar_scroll.content.winfo_children()
         if len(side_children) >= 4:
             classes_box, box_box, auto_box, export_box = side_children[:4]
 
             classes_children = classes_box.winfo_children()
-            classes_children[0].configure(text="Class List")
-            classes_children[1].configure(text="Maintain class names and review counts for the current image.")
+            classes_children[0].configure(text="类别列表")
+            classes_children[1].configure(text="维护类别名称，并查看当前图片的标注统计。")
             class_frames = [child for child in classes_children if child.winfo_class() == "Frame"]
             if len(class_frames) >= 2:
                 class_action_buttons = class_frames[1].winfo_children()
                 if len(class_action_buttons) >= 2:
-                    class_action_buttons[0].configure(text="Save Classes")
-                    class_action_buttons[1].configure(text="Go To Train")
+                    class_action_buttons[0].configure(text="保存类别")
+                    class_action_buttons[1].configure(text="转到训练")
 
             box_children = box_box.winfo_children()
-            box_children[0].configure(text="Box List")
-            box_children[1].configure(text="Select a box to review class and coordinates.")
+            box_children[0].configure(text="框列表")
+            box_children[1].configure(text="选择一个框来查看类别和坐标。")
             class_pick_row = next((child for child in box_children if child.winfo_class() == "Frame"), None)
             if class_pick_row is not None and class_pick_row.winfo_children():
-                class_pick_row.winfo_children()[0].configure(text="Class")
+                class_pick_row.winfo_children()[0].configure(text="类别")
 
             auto_children = auto_box.winfo_children()
-            auto_children[0].configure(text="AI Auto Label")
-            auto_children[1].configure(text="Run the detector on one image or the whole project.")
+            auto_children[0].configure(text="AI 自动标注")
+            auto_children[1].configure(text="可以对单张图片运行，也可以对整个项目批量运行。")
             auto_grid = next((child for child in auto_children if child.winfo_class() == "Frame"), None)
             if auto_grid is not None:
                 auto_grid_children = auto_grid.winfo_children()
                 if auto_grid_children:
-                    auto_grid_children[0].configure(text="Model")
+                    auto_grid_children[0].configure(text="模型")
                 subframes = [child for child in auto_grid_children if child.winfo_class() == "Frame"]
                 if len(subframes) >= 2:
                     browse_buttons = subframes[0].winfo_children()
                     if len(browse_buttons) >= 2:
-                        browse_buttons[0].configure(text="Browse Weights")
-                        browse_buttons[1].configure(text="Use Default")
+                        browse_buttons[0].configure(text="浏览权重")
+                        browse_buttons[1].configure(text="使用默认")
                     auto_action_buttons = subframes[1].winfo_children()
                     if len(auto_action_buttons) >= 2:
-                        auto_action_buttons[0].configure(text="Current Image")
-                        auto_action_buttons[1].configure(text="Whole Project")
+                        auto_action_buttons[0].configure(text="当前图片")
+                        auto_action_buttons[1].configure(text="整个项目")
 
             export_children = export_box.winfo_children()
-            export_children[0].configure(text="Export Dataset")
-            export_children[1].configure(text="Generate dataset.yaml with the current class list.")
-            export_children[2].configure(text="Images, labels and class names will be reorganized into a training-ready dataset structure.")
+            export_children[0].configure(text="导出数据集")
+            export_children[1].configure(text="基于当前类别列表生成 dataset.yaml。")
+            export_children[2].configure(text="图片、标签和类别名称会被整理成可直接训练的数据集结构。")
             if len(export_children) >= 5:
-                export_children[3].configure(text="Export To Train Set")
-                export_children[4].configure(text="Switch To Train")
+                export_children[3].configure(text="导出训练集")
+                export_children[4].configure(text="切换到训练")
 
     def _v2_side_box(self, parent: tk.Widget, title: str, subtitle: str) -> tk.Frame:
         frame = tk.Frame(parent, bg=CARD_BG, highlightbackground=BORDER, highlightthickness=1)
@@ -1236,11 +1259,11 @@ class DetectionAnnotationEditor(tk.Frame):
 
         total = len(self.image_paths)
         current = self.current_index + 1 if total else 0
-        self.thumbnail_summary_var.set(f"鍏ㄩ儴鍥剧墖 {total} 寮?  褰撳墠 {current} / {total}")
+        self.thumbnail_summary_var.set(f"全部图片 {total} 张  当前 {current} / {total}")
         if not self.image_paths:
             tk.Label(
                 self.thumb_strip,
-                text="閫夋嫨鍥剧墖鐩綍鍚庯紝杩欓噷浼氭樉绀洪瑙堢缉鐣ュ浘銆?",
+                text="选择图片目录后，这里会显示预览缩略图。",
                 bg=CARD_BG,
                 fg=TEXT_MUTED,
                 font=("Microsoft YaHei UI", 10),
@@ -1315,7 +1338,7 @@ class DetectionAnnotationEditor(tk.Frame):
         if not self.class_names:
             tk.Label(
                 self.class_summary_frame,
-                text="鏈厤缃被鍒?",
+                text="未配置类别",
                 bg=CARD_BG,
                 fg=TEXT_MUTED,
                 font=("Microsoft YaHei UI", 9),
@@ -1545,7 +1568,18 @@ class DetectionAnnotationEditor(tk.Frame):
         self.current_image_var.set(image_path.name)
         self.image_counter_var.set(f"{self.current_index + 1} / {len(self.image_paths)}")
         self.original_image = Image.open(image_path).convert("RGB")
-        self.boxes = load_yolo_boxes(label_path_for_image(image_path), self.original_image.width, self.original_image.height)
+        label_path = label_path_for_image(image_path)
+        self.boxes = load_yolo_boxes(label_path, self.original_image.width, self.original_image.height)
+        if not label_path.exists():
+            labelme_boxes, labelme_class_names = load_labelme_rectangle_boxes(
+                labelme_path_for_image(image_path),
+                self.original_image.width,
+                self.original_image.height,
+                [] if self.class_names == ["class0"] else self.class_names,
+            )
+            if labelme_boxes:
+                self.boxes = labelme_boxes
+                self.class_names = labelme_class_names
         if self.boxes:
             self.class_names = ensure_class_names(self.class_names, max(box.class_id for box in self.boxes))
             self._set_class_text(self.class_names)

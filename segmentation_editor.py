@@ -375,13 +375,18 @@ class SegmentationAnnotationEditor(tk.Frame):
 
         canvas_panel = tk.Frame(center, bg=CARD_BG, highlightbackground=BORDER, highlightthickness=1)
         canvas_panel.grid(row=0, column=0, sticky="nsew")
-        canvas_panel.grid_rowconfigure(1, weight=1)
+        canvas_panel.grid_rowconfigure(2, weight=1)
         canvas_panel.grid_columnconfigure(0, weight=1)
 
         toolbar = tk.Frame(canvas_panel, bg=CARD_BG)
         toolbar.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 8))
         tk.Label(toolbar, text="实例分割画布", bg=CARD_BG, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(side="left")
         tk.Label(toolbar, textvariable=self.status_var, bg=CARD_BG, fg=TEXT_MUTED, font=("Microsoft YaHei UI", 10)).pack(side="right")
+
+        self._v2_shortcut_strip(
+            canvas_panel,
+            ("左键添加顶点", "双击完成轮廓", "右键撤销一点", "编辑模式拖动顶点", "Ctrl+S 保存"),
+        ).grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 8))
 
         self.canvas = tk.Canvas(
             canvas_panel,
@@ -391,7 +396,7 @@ class SegmentationAnnotationEditor(tk.Frame):
             relief="flat",
             cursor="crosshair",
         )
-        self.canvas.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 10))
+        self.canvas.grid(row=2, column=0, sticky="nsew", padx=10, pady=(0, 10))
         self.canvas.bind("<Configure>", lambda _event: self.redraw_canvas())
         self.canvas.bind("<ButtonPress-1>", self.on_canvas_press)
         self.canvas.bind("<Double-Button-1>", self.on_canvas_double_click)
@@ -402,10 +407,12 @@ class SegmentationAnnotationEditor(tk.Frame):
         self.canvas.bind("<Escape>", lambda _event: self.clear_current_points())
         self.canvas.bind("<Delete>", lambda _event: self.delete_selected_polygon())
         self.canvas.bind("<BackSpace>", lambda _event: self.delete_selected_polygon())
+        self.canvas.bind("<Control-s>", lambda _event: self.save_current_annotations())
 
         filmstrip = tk.Frame(center, bg=CARD_BG, highlightbackground=BORDER, highlightthickness=1)
         filmstrip.grid(row=1, column=0, sticky="ew", pady=(8, 0))
         filmstrip.grid_columnconfigure(1, weight=1)
+        self.v2_filmstrip = filmstrip
         tk.Label(filmstrip, textvariable=self.thumbnail_summary_var, bg=CARD_BG, fg=TEXT, font=("Microsoft YaHei UI", 10, "bold")).grid(row=0, column=0, sticky="w", padx=10, pady=(8, 4))
         tk.Label(filmstrip, text="点击缩略图可快速切换当前图片。", bg=CARD_BG, fg=TEXT_MUTED, font=("Microsoft YaHei UI", 9)).grid(row=0, column=1, sticky="e", padx=10, pady=(8, 4))
 
@@ -521,6 +528,20 @@ class SegmentationAnnotationEditor(tk.Frame):
             return
         self._set_v2_tool_button_state(getattr(self, "v2_draw_button", None), selected=self.draw_mode_var.get())
         self._set_v2_tool_button_state(getattr(self, "v2_edit_button", None), selected=not self.draw_mode_var.get())
+
+    def _v2_shortcut_strip(self, parent: tk.Widget, hints: tuple[str, ...]) -> tk.Frame:
+        strip = tk.Frame(parent, bg="#f8fbff", highlightbackground=BORDER, highlightthickness=1)
+        for index, hint in enumerate(hints):
+            tk.Label(
+                strip,
+                text=hint,
+                bg="#f8fbff",
+                fg=TEXT_MUTED,
+                font=("Microsoft YaHei UI", 9, "bold"),
+                padx=10,
+                pady=5,
+            ).pack(side="left", padx=(0, 4) if index < len(hints) - 1 else 0)
+        return strip
 
     def _bind_thumbnail_mousewheel_target(self, widget: tk.Widget) -> None:
         widget.bind("<MouseWheel>", self._on_thumbnail_mousewheel, add="+")

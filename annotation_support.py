@@ -72,6 +72,10 @@ def label_path_for_image(image_path: Path) -> Path:
     return image_path.with_suffix(".txt")
 
 
+def labelme_path_for_image(image_path: Path) -> Path:
+    return image_path.with_suffix(".json")
+
+
 def classes_path_for_folder(folder: Path) -> Path:
     return folder / CLASS_NAME_FILES[0]
 
@@ -95,7 +99,7 @@ def load_class_names(folder: Path) -> list[str]:
         if not candidate.exists():
             continue
         try:
-            return parse_class_names_text(candidate.read_text(encoding="utf-8"))
+            return parse_class_names_text(candidate.read_text(encoding="utf-8-sig"))
         except OSError:
             continue
     return []
@@ -122,7 +126,7 @@ def load_yolo_boxes(label_path: Path, image_width: int, image_height: int) -> li
         return []
 
     boxes: list[AnnotationBox] = []
-    for raw_line in label_path.read_text(encoding="utf-8").splitlines():
+    for raw_line in label_path.read_text(encoding="utf-8-sig").splitlines():
         line = raw_line.strip()
         if not line:
             continue
@@ -146,6 +150,128 @@ def load_yolo_boxes(label_path: Path, image_width: int, image_height: int) -> li
     return boxes
 
 
+def _clamp_pixel(value: float, limit: int) -> float:
+    return min(max(float(value), 0.0), float(limit))
+
+
+def load_labelme_rectangle_boxes(
+    json_path: Path,
+    image_width: int,
+    image_height: int,
+    class_names: list[str],
+) -> tuple[list[AnnotationBox], list[str]]:
+    if not json_path.exists():
+        return [], list(class_names)
+
+    try:
+        payload = json.loads(json_path.read_text(encoding="utf-8-sig"))
+    except Exception:
+        return [], list(class_names)
+    if not isinstance(payload, dict):
+        return [], list(class_names)
+
+    resolved_names = list(parse_class_names_text("\n".join(class_names)))
+    boxes: list[AnnotationBox] = []
+    for shape in payload.get("shapes", []):
+        if not isinstance(shape, dict):
+            continue
+        shape_type = str(shape.get("shape_type") or "rectangle").strip().lower()
+        if shape_type != "rectangle":
+            continue
+
+        label = str(shape.get("label") or "").strip()
+        points = shape.get("points") or []
+        if not label or not isinstance(points, list) or len(points) < 2:
+            continue
+
+        try:
+            xs = [float(point[0]) for point in points if isinstance(point, (list, tuple)) and len(point) >= 2]
+            ys = [float(point[1]) for point in points if isinstance(point, (list, tuple)) and len(point) >= 2]
+        except (TypeError, ValueError):
+            continue
+        if not xs or not ys:
+            continue
+
+        left = _clamp_pixel(min(xs), image_width)
+        right = _clamp_pixel(max(xs), image_width)
+        top = _clamp_pixel(min(ys), image_height)
+        bottom = _clamp_pixel(max(ys), image_height)
+        if right <= left or bottom <= top:
+            continue
+
+        if label not in resolved_names:
+            resolved_names.append(label)
+        boxes.append(
+            AnnotationBox(
+                class_id=resolved_names.index(label),
+                x1=left,
+                y1=top,
+                x2=right,
+                y2=bottom,
+            )
+        )
+
+    return boxes, resolved_names
+
+
+def load_labelme_rectangle_class_names(json_path: Path) -> list[str]:
+    if not json_path.exists():
+        return []
+    try:
+        payload = json.loads(json_path.read_text(encoding="utf-8-sig"))
+    except Exception:
+        return []
+    if not isinstance(payload, dict):
+        return []
+
+    names: list[str] = []
+    seen: set[str] = set()
+    for shape in payload.get("shapes", []):
+        if not isinstance(shape, dict):
+            continue
+        shape_type = str(shape.get("shape_type") or "rectangle").strip().lower()
+        if shape_type != "rectangle":
+            continue
+        label = str(shape.get("label") or "").strip()
+        if not label or label in seen:
+            continue
+        seen.add(label)
+        names.append(label)
+    return names
+
+
+def collect_labelme_rectangle_class_names(image_paths: list[Path]) -> list[str]:
+    names: list[str] = []
+    seen: set[str] = set()
+    for image_path in image_paths:
+        for label in load_labelme_rectangle_class_names(labelme_path_for_image(image_path)):
+            if label in seen:
+                continue
+            seen.add(label)
+            names.append(label)
+    return names
+
+
+def labelme_rectangles_to_yolo_lines(
+    json_path: Path,
+    image_width: int,
+    image_height: int,
+    class_names: list[str],
+) -> tuple[list[str], list[str]]:
+    boxes, resolved_names = load_labelme_rectangle_boxes(json_path, image_width, image_height, class_names)
+    lines: list[str] = []
+    for box in boxes:
+        class_id, x_center, y_center, width, height = box.normalized(image_width, image_height)
+        x_center = min(max(x_center, 0.0), 1.0)
+        y_center = min(max(y_center, 0.0), 1.0)
+        width = min(max(width, 0.0), 1.0)
+        height = min(max(height, 0.0), 1.0)
+        if width <= 0.0 or height <= 0.0:
+            continue
+        lines.append(f"{class_id} {x_center:.6f} {y_center:.6f} {width:.6f} {height:.6f}")
+    return lines, resolved_names
+
+
 def save_yolo_boxes(label_path: Path, boxes: list[AnnotationBox], image_width: int, image_height: int) -> None:
     lines: list[str] = []
     for box in boxes:
@@ -165,7 +291,7 @@ def load_yolo_polygons(label_path: Path, image_width: int, image_height: int) ->
         return []
 
     polygons: list[AnnotationPolygon] = []
-    for raw_line in label_path.read_text(encoding="utf-8").splitlines():
+    for raw_line in label_path.read_text(encoding="utf-8-sig").splitlines():
         line = raw_line.strip()
         if not line:
             continue
@@ -224,7 +350,7 @@ def infer_max_class_id_from_label_lines(lines: list[str]) -> int:
 
 def infer_max_class_id_from_label_file(label_path: Path) -> int:
     try:
-        lines = label_path.read_text(encoding="utf-8").splitlines()
+        lines = label_path.read_text(encoding="utf-8-sig").splitlines()
     except OSError:
         return -1
     return infer_max_class_id_from_label_lines(lines)
@@ -234,7 +360,7 @@ def load_session_store(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
     except Exception:
         return {}
     return payload if isinstance(payload, dict) else {}

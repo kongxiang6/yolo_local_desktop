@@ -14,8 +14,11 @@ import yaml
 
 from annotation_support import (
     IMAGE_SUFFIXES,
+    collect_labelme_rectangle_class_names,
     ensure_class_names,
     infer_max_class_id_from_label_file,
+    labelme_path_for_image,
+    labelme_rectangles_to_yolo_lines,
     load_class_names,
     parse_class_names_text,
 )
@@ -53,6 +56,14 @@ class OrganizeReport:
     val_count: int
     class_names: list[str]
     warnings: list[str]
+
+
+@dataclass
+class ResolvedLabel:
+    source_path: Path
+    lines: list[str]
+    class_names: list[str]
+    format_name: str
 
 
 def guess_output_path(source_dir: Path, task_id: str) -> Path:
@@ -140,6 +151,97 @@ def _resolve_class_names(source_dir: Path, explicit_names: list[str], label_path
     return ensure_class_names([], max_class_id=max_class_id)
 
 
+def _infer_max_class_id_from_resolved_labels(labels: list[ResolvedLabel]) -> int:
+    max_class_id = -1
+    for label in labels:
+        for raw_line in label.lines:
+            parts = raw_line.strip().split()
+            if not parts:
+                continue
+            try:
+                class_id = int(parts[0])
+            except ValueError:
+                continue
+            max_class_id = max(max_class_id, class_id)
+    return max_class_id
+
+
+def _merge_label_class_names(base_names: list[str], labels: list[ResolvedLabel]) -> list[str]:
+    merged = list(parse_class_names_text("\n".join(base_names)))
+    seen = set(merged)
+    for label in labels:
+        for name in label.class_names:
+            if name in seen:
+                continue
+            seen.add(name)
+            merged.append(name)
+    return merged
+
+
+def _resolve_class_names_from_labels(source_dir: Path, explicit_names: list[str], labels: list[ResolvedLabel]) -> list[str]:
+    max_class_id = _infer_max_class_id_from_resolved_labels(labels)
+    if explicit_names:
+        return ensure_class_names(_merge_label_class_names(explicit_names, labels), max_class_id=max_class_id)
+
+    auto_names = load_class_names(source_dir)
+    if auto_names:
+        return ensure_class_names(_merge_label_class_names(auto_names, labels), max_class_id=max_class_id)
+
+    labelme_names: list[str] = []
+    seen: set[str] = set()
+    for label in labels:
+        for name in label.class_names:
+            if name in seen:
+                continue
+            seen.add(name)
+            labelme_names.append(name)
+    if labelme_names:
+        return ensure_class_names(labelme_names, max_class_id=max_class_id)
+
+    return ensure_class_names([], max_class_id=max_class_id)
+
+
+def _read_image_size(image_path: Path) -> tuple[int, int] | None:
+    try:
+        from PIL import Image
+
+        with Image.open(image_path) as image:
+            return int(image.width), int(image.height)
+    except Exception:
+        return None
+
+
+def _resolve_detection_label(source_dir: Path, image_path: Path, class_names: list[str]) -> ResolvedLabel | None:
+    label_path = resolve_yolo_label_path(source_dir, image_path)
+    if label_path is not None:
+        return ResolvedLabel(
+            source_path=label_path,
+            lines=label_path.read_text(encoding="utf-8").splitlines(),
+            class_names=[],
+            format_name="yolo",
+        )
+
+    json_path = labelme_path_for_image(image_path)
+    if not json_path.exists():
+        return None
+
+    image_size = _read_image_size(image_path)
+    if image_size is None:
+        return None
+    image_width, image_height = image_size
+    lines, resolved_names = labelme_rectangles_to_yolo_lines(json_path, image_width, image_height, class_names)
+    return ResolvedLabel(source_path=json_path, lines=lines, class_names=resolved_names, format_name="labelme-json")
+
+
+def _base_detection_class_names(source_dir: Path, images: list[Path], explicit_names: list[str]) -> list[str]:
+    if explicit_names:
+        return explicit_names
+    auto_names = load_class_names(source_dir)
+    if auto_names:
+        return auto_names
+    return collect_labelme_rectangle_class_names(images)
+
+
 def prepare_yolo_task_dataset(
     *,
     task_id: str,
@@ -157,17 +259,31 @@ def prepare_yolo_task_dataset(
         raise ValueError("源目录里没有找到图片。")
 
     warnings: list[str] = []
-    valid_samples: list[tuple[Path, Path]] = []
-    label_paths: list[Path] = []
+    base_class_names = _base_detection_class_names(source_dir, images, class_names) if task_id == "detect" else class_names
+    valid_samples: list[tuple[Path, ResolvedLabel]] = []
+    resolved_labels: list[ResolvedLabel] = []
     for image_path in images:
-        label_path = resolve_yolo_label_path(source_dir, image_path)
-        if label_path is None:
+        if task_id == "detect":
+            label = _resolve_detection_label(source_dir, image_path, base_class_names)
+        else:
+            label_path = resolve_yolo_label_path(source_dir, image_path)
+            label = (
+                ResolvedLabel(
+                    source_path=label_path,
+                    lines=label_path.read_text(encoding="utf-8").splitlines(),
+                    class_names=[],
+                    format_name="yolo",
+                )
+                if label_path is not None
+                else None
+            )
+        if label is None:
             warnings.append(f"缺少同名标签：{image_path.name}")
             if strict:
                 raise ValueError(f"找不到图片对应的标签：{image_path}")
             continue
-        valid_samples.append((image_path, label_path))
-        label_paths.append(label_path)
+        valid_samples.append((image_path, label))
+        resolved_labels.append(label)
 
     if not valid_samples:
         raise ValueError("没有找到可整理的图片+标签配对。")
@@ -177,27 +293,27 @@ def prepare_yolo_task_dataset(
         if stale_dir.exists():
             shutil.rmtree(stale_dir, ignore_errors=True)
     train_items, val_items = split_items([item[0] for item in valid_samples], val_ratio, seed)
-    item_map = {image_path: label_path for image_path, label_path in valid_samples}
-    resolved_names = _resolve_class_names(source_dir, class_names, label_paths)
+    item_map = {image_path: label for image_path, label in valid_samples}
+    resolved_names = _resolve_class_names_from_labels(source_dir, class_names, resolved_labels)
 
-    image_index = {path: index for index, (path, _label_path) in enumerate(valid_samples)}
+    image_index = {path: index for index, (path, _label) in enumerate(valid_samples)}
 
     def write_split(split_name: str, split_items_list: list[Path]) -> None:
         for image_path in split_items_list:
-            label_path = item_map[image_path]
+            label = item_map[image_path]
             sample_index = image_index[image_path] + 1
             target_image = output_dir / "images" / split_name / f"{sample_index:06d}{image_path.suffix.lower()}"
             target_label = output_dir / "labels" / split_name / f"{sample_index:06d}.txt"
             _link_or_copy_file(image_path, target_image, copy_mode)
             target_label.parent.mkdir(parents=True, exist_ok=True)
-            target_label.write_text(label_path.read_text(encoding="utf-8"), encoding="utf-8")
+            target_label.write_text("\n".join(label.lines), encoding="utf-8")
 
     write_split("train", train_items)
     write_split("val", val_items)
 
     dataset_yaml = output_dir / "dataset.yaml"
     payload = {
-        "path": ".",
+        "path": output_dir.as_posix(),
         "train": "images/train",
         "val": "images/val",
         "names": resolved_names,

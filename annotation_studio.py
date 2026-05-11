@@ -142,10 +142,7 @@ class AnnotationStudio(tk.Frame):
             "ai_platform": self.ai_platform_panel,
             "model_hub": self.model_hub_panel,
         }
-        for view in self.workspace_views.values():
-            view.grid(row=0, column=0, sticky="nsew")
-
-        self.show_workspace("detect")
+        self.show_workspace("detect", notify=False)
 
     def _build_shell(self) -> None:
         shell = tk.Frame(self, bg=WINDOW_BG)
@@ -264,9 +261,14 @@ class AnnotationStudio(tk.Frame):
             current_text = self.export_preview_dir()
         self.workspace_context_var.set(f"当前目录\n{project_text}\n\n当前内容\n{current_text}")
 
-    def show_workspace(self, workspace_id: str) -> None:
+    def show_workspace(self, workspace_id: str, *, notify: bool = True) -> None:
         self._active_workspace = workspace_id
-        self.workspace_views[workspace_id].tkraise()
+        for item, view in self.workspace_views.items():
+            if item == workspace_id:
+                view.grid(row=0, column=0, sticky="nsew")
+                view.tkraise()
+            else:
+                view.grid_remove()
         for item, button in self.workspace_buttons.items():
             is_active = item == workspace_id
             button.configure(
@@ -276,8 +278,9 @@ class AnnotationStudio(tk.Frame):
                 highlightbackground=PRIMARY if is_active else BORDER,
             )
         self._refresh_dashboard()
-        self.external_on_state_change()
-        if self.external_on_workspace_change is not None:
+        if notify:
+            self.external_on_state_change()
+        if notify and self.external_on_workspace_change is not None:
             self.external_on_workspace_change(workspace_id)
 
     def _prefill_segment_organizer(self, source_dir: Path, class_names: list[str]) -> None:

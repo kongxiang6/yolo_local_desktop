@@ -21,6 +21,7 @@ app.messagebox.showinfo = _record("info")
 app.messagebox.showwarning = _record("warning")
 app.messagebox.showerror = _record("error")
 app.messagebox.askyesno = lambda *args, **kwargs: True
+app.messagebox.askyesnocancel = lambda *args, **kwargs: False
 
 
 def walk(widget: tk.Widget):
@@ -53,7 +54,7 @@ assert ui._environment_dialog_needs_warning(cpu_recommended_payload) is False
 
 gpu_recommended_payload = {
     "accelerator": "cu126",
-    "system_nvidia": {"available": True, "gpu_name": "NVIDIA GeForce GTX 1050 Ti", "gpu_architecture": "Pascal"},
+    "system_nvidia": {"available": True, "gpu_name": "NVIDIA GeForce GTX 1050 Ti", "gpu_architecture": "Pascal", "compute_capability": "6.1"},
     "runtime_backend": "cpu",
 }
 assert ui._runtime_needs_configuration(gpu_recommended_payload) is True
@@ -65,6 +66,47 @@ unsupported_payload = {
     "runtime_backend": "nvidia-unsupported",
 }
 assert ui._runtime_needs_configuration(unsupported_payload) is True
+
+# 老显卡配置方案：默认推荐稳定 CPU，也允许用户主动尝试 CUDA 兼容模式
+legacy_payload = {
+    "system_nvidia": {
+        "available": True,
+        "gpu_name": "NVIDIA GeForce GTX 1050 Ti",
+        "gpu_architecture": "Pascal",
+        "compute_capability": "6.1",
+    }
+}
+assert ui._legacy_cuda_choice_available(legacy_payload) is True
+assert ui._legacy_cuda_choice_available({"system_nvidia": {"available": True, "gpu_architecture": "Kepler"}}) is False
+assert ui._legacy_cuda_choice_available({"system_nvidia": {"available": True, "gpu_name": "Tesla K80", "gpu_architecture": "Kepler", "compute_capability": "3.7"}}) is False
+assert ui._legacy_cuda_choice_available({"system_nvidia": {"available": True, "gpu_name": "NVIDIA GeForce GTX 980", "gpu_architecture": "Maxwell", "compute_capability": "5.2"}}) is True
+assert ui._legacy_cuda_choice_available({"system_nvidia": {"available": True, "gpu_name": "NVIDIA GeForce GTX 1660 Ti", "gpu_architecture": "Turing", "compute_capability": "7.5"}}) is False
+assert ui._choose_accelerator_mode_for_configuration({"payload": legacy_payload}) == "stable-cpu"
+
+app.messagebox.askyesnocancel = lambda *args, **kwargs: True
+assert ui._choose_accelerator_mode_for_configuration({"payload": legacy_payload}) == "legacy-cuda"
+
+app.messagebox.askyesnocancel = lambda *args, **kwargs: None
+assert ui._choose_accelerator_mode_for_configuration({"payload": legacy_payload}) is None
+
+app.messagebox.askyesnocancel = lambda *args, **kwargs: False
+assert ui._choose_accelerator_mode_for_configuration({"payload": {"system_nvidia": {"available": False}}}) == "auto"
+
+original_detect_nvidia_environment = app.runtime_installer.detect_nvidia_environment
+try:
+    app.runtime_installer.detect_nvidia_environment = lambda: {
+        "available": True,
+        "gpu_name": "NVIDIA GeForce GTX 1050 Ti",
+        "gpu_architecture": "Pascal",
+        "compute_capability": "6.1",
+        "driver_version": "999.99",
+        "cuda_version": "13.0",
+    }
+    app.messagebox.askyesnocancel = lambda *args, **kwargs: True
+    assert ui._choose_accelerator_mode_for_configuration({"state": "missing-runtime"}) == "legacy-cuda"
+finally:
+    app.runtime_installer.detect_nvidia_environment = original_detect_nvidia_environment
+    app.messagebox.askyesnocancel = lambda *args, **kwargs: False
 
 # 页签切换 + 滚动复位
 ui._show_tab("annotation")

@@ -7,17 +7,31 @@ import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-
-from annotation_support import AnnotationBox, ensure_class_names, list_annotation_images, save_class_names, save_yolo_boxes
-
+from urllib.parse import urlparse
 
 APP_DIR = Path(__file__).resolve().parent
 VENDOR_DIR = APP_DIR / "vendor_backend"
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 NO_WINDOW_FLAGS = CREATE_NO_WINDOW if os.name == "nt" else 0
 
-if str(VENDOR_DIR) not in sys.path:
-    sys.path.insert(0, str(VENDOR_DIR))
+
+def _move_import_path_to_end(path: Path) -> None:
+    """Keep bundled app modules importable without shadowing runtime stdlib extensions."""
+    target = path.resolve(strict=False)
+    kept_paths: list[str] = []
+    for entry in sys.path:
+        entry_path = Path(entry or os.getcwd()).resolve(strict=False)
+        if entry_path == target:
+            continue
+        kept_paths.append(entry)
+    kept_paths.append(str(target))
+    sys.path[:] = kept_paths
+
+
+_move_import_path_to_end(APP_DIR)
+_move_import_path_to_end(VENDOR_DIR)
+
+from annotation_support import AnnotationBox, ensure_class_names, list_annotation_images, save_class_names, save_yolo_boxes
 
 import runtime_preflight
 import runtime_installer
@@ -32,12 +46,22 @@ for stream in (sys.stdout, sys.stderr):
         pass
 
 
+def safe_protocol_print(text: str) -> None:
+    try:
+        print(text, flush=True)
+    except (OSError, ValueError):
+        # Windowed PyInstaller children can have an invalid stdout handle when
+        # launched without an attached console. Logging must never crash the
+        # backend command itself.
+        pass
+
+
 def emit(tag: str, payload: dict) -> None:
-    print(f"[{tag}] {json.dumps(payload, ensure_ascii=False)}", flush=True)
+    safe_protocol_print(f"[{tag}] {json.dumps(payload, ensure_ascii=False)}")
 
 
 def load_json(path: str) -> dict:
-    payload = json.loads(Path(path).expanduser().resolve().read_text(encoding="utf-8"))
+    payload = json.loads(Path(path).expanduser().resolve().read_text(encoding="utf-8-sig"))
     if not isinstance(payload, dict):
         raise ValueError("配置文件必须是 JSON 对象。")
     return payload
@@ -47,6 +71,82 @@ def emit_status(message: str, **extra: object) -> None:
     payload = {"message": message}
     payload.update(extra)
     emit("STATUS", payload)
+
+
+def _backend_process_env(*, include_extra_index: bool = True) -> dict[str, str]:
+    env = os.environ.copy()
+    env["PYTHONUTF8"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUNBUFFERED"] = "1"
+    env["PIP_NO_INPUT"] = "1"
+    if not include_extra_index:
+        env.pop("PIP_EXTRA_INDEX_URL", None)
+    return env
+
+
+def run_runtime_preflight_subprocess(include_extra_index: bool = True) -> dict[str, object]:
+    if getattr(sys, "frozen", False):
+        command = [sys.executable, "--backend-command", "runtime-preflight"]
+    else:
+        command = [sys.executable, "-u", str(VENDOR_DIR / "runtime_preflight.py")]
+    process = subprocess.run(
+        command,
+        cwd=str(APP_DIR),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=_backend_process_env(include_extra_index=include_extra_index),
+        creationflags=NO_WINDOW_FLAGS,
+        check=False,
+    )
+    output = (process.stdout or "").strip()
+    if process.returncode != 0:
+        detail = (process.stderr or output or f"退出码 {process.returncode}").strip()
+        return runtime_preflight.build_broken_runtime_report(detail)
+    if not output:
+        return runtime_preflight.build_broken_runtime_report("运行环境自检没有返回结果。")
+    try:
+        payload = json.loads(output.splitlines()[-1])
+    except json.JSONDecodeError as exc:
+        return runtime_preflight.build_broken_runtime_report(f"运行环境自检结果无法解析：{exc}；输出：{output[-500:]}")
+    if not isinstance(payload, dict):
+        return runtime_preflight.build_broken_runtime_report("运行环境自检返回了非对象结果。")
+    return payload
+
+
+def run_runtime_preflight_command(_: argparse.Namespace) -> int:
+    safe_protocol_print(json.dumps(runtime_preflight.run_runtime_preflight(), ensure_ascii=False))
+    return 0
+
+
+def validate_configured_runtime(plan: dict[str, object], report: dict[str, object]) -> None:
+    expected_accelerator = str(plan.get("accelerator") or "cpu").strip().lower()
+    runtime_backend = str(report.get("runtime_backend") or "cpu").strip().lower()
+    if runtime_backend == "broken":
+        detail = str(report.get("preflight_error") or report.get("runtime_backend_label") or "依赖导入失败").strip()
+        raise RuntimeError(f"环境配置后自检失败：{detail}。请重新执行一键配置环境。")
+    if expected_accelerator == "cpu" or runtime_backend == "nvidia":
+        return
+
+    expected_label = str(plan.get("accelerator_label") or expected_accelerator.upper()).strip()
+    runtime_label = str(report.get("runtime_backend_label") or "当前运行环境使用 CPU").strip()
+    torch_version = str(report.get("torch_version") or "未知").strip()
+    torch_build = str(report.get("torch_build_label") or "").strip()
+    torch_cuda_version = str(report.get("torch_cuda_version") or "").strip()
+    torch_cuda_warnings = report.get("torch_cuda_warnings") or []
+    warning_text = ""
+    if isinstance(torch_cuda_warnings, list) and torch_cuda_warnings:
+        warning_text = f"；CUDA 警告：{str(torch_cuda_warnings[0]).strip()}"
+    cuda_text = f"，Torch CUDA: {torch_cuda_version}" if torch_cuda_version else ""
+    raise RuntimeError(
+        "你选择的是显卡 CUDA 方案，但安装完成后的自检没有启用 NVIDIA 显卡，"
+        "程序已停止并且不会把这次环境配置当作成功。\n"
+        f"计划方案：{expected_label}；实际结果：{runtime_label}；"
+        f"Torch: {torch_version}（{torch_build or '未知构建'}）{cuda_text}{warning_text}。\n"
+        "请重新点击“一键配置环境”后选择合适方案：1050 Ti / Pascal 可尝试“老显卡 CUDA 兼容模式”；"
+        "如果仍失败，说明当前驱动、Python 或 PyTorch 轮子组合无法启用显卡，请改选“稳定 CPU 模式”。"
+    )
 
 
 def jsonable(value: object) -> object:
@@ -62,6 +162,47 @@ def jsonable(value: object) -> object:
     if isinstance(value, (str, int, float, bool)) or value is None:
         return value
     return str(value)
+
+
+def _public_install_plan(plan: dict[str, object]) -> dict[str, object]:
+    payload = {
+        key: value
+        for key, value in plan.items()
+        if key not in {"commands", "tool_fallback_steps", "app_fallback_steps"}
+    }
+    for key in ("tool_wheel_downloads", "torch_wheel_downloads", "app_wheel_downloads"):
+        downloads = payload.get(key)
+        if not isinstance(downloads, list):
+            continue
+        payload[f"{key}_count"] = len(downloads)
+        payload[key] = [
+            {
+                item_key: item.get(item_key)
+                for item_key in ("requirement", "package", "filename", "target_path")
+                if isinstance(item, dict) and item.get(item_key)
+            }
+            for item in downloads
+            if isinstance(item, dict)
+        ]
+    return payload
+
+
+def summarize_download_sources(label: str, chosen_urls: list[str]) -> str:
+    hosts: list[str] = []
+    cache_count = 0
+    for url in chosen_urls:
+        if url == "cache":
+            cache_count += 1
+            continue
+        host = urlparse(url).netloc or url
+        if host and host not in hosts:
+            hosts.append(host)
+    parts = [f"{len(chosen_urls)} 个文件"]
+    if cache_count:
+        parts.append(f"{cache_count} 个复用缓存")
+    if hosts:
+        parts.append("来源：" + " / ".join(hosts[:4]) + (" ..." if len(hosts) > 4 else ""))
+    return f"{label}下载完成：" + "，".join(parts)
 
 
 def build_export_namespace(task: str, weights: str, config: dict) -> SimpleNamespace:
@@ -92,18 +233,33 @@ def build_export_namespace(task: str, weights: str, config: dict) -> SimpleNames
 
 def run_check(_: argparse.Namespace) -> int:
     system_nvidia = runtime_installer.detect_nvidia_environment()
-    accelerator, torch_index = runtime_installer.choose_torch_index(
+    recommended_accelerator, recommended_torch_index = runtime_installer.choose_torch_index(
         str(system_nvidia.get("cuda_version") or ""),
         str(system_nvidia.get("gpu_architecture") or ""),
+        "auto",
+        str(system_nvidia.get("gpu_name") or ""),
+        str(system_nvidia.get("compute_capability") or ""),
     )
-    try:
-        report = runtime_preflight.run_runtime_preflight()
-    except Exception as exc:
-        report = runtime_preflight.build_broken_runtime_report(str(exc))
-    report.update(runtime_installer.build_accelerator_summary(accelerator, system_nvidia))
-    report["accelerator"] = accelerator
-    report["torch_index"] = torch_index
+    report = run_runtime_preflight_subprocess()
+    runtime_backend = str(report.get("runtime_backend") or "").strip().lower()
+    active_accelerator = recommended_accelerator
+    active_torch_index = recommended_torch_index
+    if runtime_backend == "nvidia":
+        torch_cuda_version = str(report.get("torch_cuda_version") or "").strip()
+        active_accelerator = f"cu{torch_cuda_version.replace('.', '')}" if torch_cuda_version else "cuda"
+        active_torch_index = ""
+
+    report.update(runtime_installer.build_accelerator_summary(active_accelerator, system_nvidia))
+    report["accelerator"] = active_accelerator
+    report["torch_index"] = active_torch_index
+    report["recommended_accelerator"] = recommended_accelerator
+    report["recommended_torch_index"] = recommended_torch_index
     report["system_nvidia"] = system_nvidia
+    report["legacy_cuda_compatibility"] = runtime_installer.legacy_cuda_compatibility(
+        str(system_nvidia.get("gpu_name") or ""),
+        str(system_nvidia.get("gpu_architecture") or ""),
+        str(system_nvidia.get("compute_capability") or ""),
+    )
     report["python"] = sys.executable
     emit("RESULT", {"kind": "check", **report})
     return 0
@@ -112,7 +268,11 @@ def run_check(_: argparse.Namespace) -> int:
 def run_configure_env(args: argparse.Namespace) -> int:
     emit_status("正在检测电脑配置和下载源")
     diagnostic_logger = lambda message: emit("APP_DIAGNOSTIC", {"level": "info", "message": message})
-    plan = runtime_installer.build_install_plan(log=diagnostic_logger)
+    runtime_installer.cleanup_download_cache(diagnostic_logger, remove_ready_wheels=False, max_age_hours=6.0)
+    plan = runtime_installer.build_install_plan(
+        log=diagnostic_logger,
+        accelerator_mode=args.accelerator_mode,
+    )
     accelerator_summary = runtime_installer.build_accelerator_summary(str(plan["accelerator"]), plan.get("gpu") or {})
     plan.update(accelerator_summary)
     emit_status(
@@ -138,7 +298,7 @@ def run_configure_env(args: argparse.Namespace) -> int:
         emit("APP_DIAGNOSTIC", {"level": "info", "message": str(note)})
 
     if args.dry_run:
-        emit("RESULT", {"kind": "configure-env", **{k: v for k, v in plan.items() if k != "commands"}})
+        emit("RESULT", {"kind": "configure-env", **_public_install_plan(plan)})
         return 0
 
     emit_status("正在准备 pip 环境")
@@ -148,15 +308,167 @@ def run_configure_env(args: argparse.Namespace) -> int:
     emit("APP_DIAGNOSTIC", {"level": "info", "message": f"Pip 准备完成: {bootstrap_info['message']}"})
 
     commands = list(plan.get("commands") or [])
+    extra_index_flags = list(plan.get("command_extra_index_flags") or [])
+    tool_wheel_downloads = list(plan.get("tool_wheel_downloads") or [])
+    tool_fallback_steps = list(plan.get("tool_fallback_steps") or [])
+    torch_wheel_downloads = list(plan.get("torch_wheel_downloads") or [])
+    app_wheel_downloads = list(plan.get("app_wheel_downloads") or [])
+    app_fallback_steps = list(plan.get("app_fallback_steps") or [])
     for index, command in enumerate(commands, start=1):
+        if command == [["__DOWNLOAD_TOOL_WHEELS__"]]:
+            emit_status(f"正在执行第 {index}/{len(commands)} 步", command="download tool wheels")
+            try:
+                wheel_paths, chosen_urls = runtime_installer.download_app_wheels(
+                    tool_wheel_downloads,
+                    diagnostic_logger,
+                    label="基础安装工具",
+                )
+                install_command = runtime_installer.install_tool_wheels(wheel_paths)
+                emit(
+                    "APP_DIAGNOSTIC",
+                    {
+                        "level": "info",
+                        "message": summarize_download_sources("基础安装工具 wheel ", chosen_urls),
+                    },
+                )
+                emit_status(
+                    f"正在执行第 {index}/{len(commands)} 步（本地安装基础工具 wheel）",
+                    command=subprocess.list2cmdline(install_command),
+                )
+                return_code = runtime_installer.stream_command(install_command, include_extra_index=False)
+                if return_code == 0:
+                    continue
+                emit(
+                    "APP_DIAGNOSTIC",
+                    {
+                        "level": "warning",
+                        "message": f"基础工具本地 wheel 安装失败，退出码 {return_code}，自动回退到普通 pip 多源安装。",
+                    },
+                )
+            except Exception as exc:
+                emit(
+                    "APP_DIAGNOSTIC",
+                    {
+                        "level": "warning",
+                        "message": f"基础工具预下载失败，自动回退到普通 pip 多源安装：{exc}",
+                    },
+                )
+            alternatives = tool_fallback_steps
+            last_code = 0
+            for attempt_index, attempt_command in enumerate(alternatives, start=1):
+                emit_status(
+                    f"正在执行第 {index}/{len(commands)} 步（回退尝试 {attempt_index}/{len(alternatives)}）",
+                    command=subprocess.list2cmdline(attempt_command),
+                )
+                return_code = runtime_installer.stream_command(attempt_command, include_extra_index=True)
+                if return_code == 0:
+                    last_code = 0
+                    break
+                last_code = return_code
+                emit(
+                    "APP_DIAGNOSTIC",
+                    {
+                        "level": "warning",
+                        "message": f"第 {index} 步基础工具回退源 {attempt_index} 失败，退出码 {return_code}，准备尝试下一个源。",
+                    },
+                )
+            if last_code != 0:
+                raise RuntimeError(f"环境配置失败，第 {index} 步退出码为 {last_code}。")
+            continue
+        if command == [["__DOWNLOAD_TORCH_WHEELS__"]]:
+            emit_status(f"正在执行第 {index}/{len(commands)} 步", command="download torch wheels")
+            wheel_paths, chosen_urls = runtime_installer.download_torch_wheels(torch_wheel_downloads, diagnostic_logger)
+            install_command = runtime_installer.install_torch_wheels(
+                wheel_paths,
+                force_reinstall=bool(plan.get("force_torch_reinstall")),
+                dependency_index=str(plan.get("pip_dependency_index") or ""),
+                dependency_indexes=list(plan.get("pip_dependency_indexes") or []),
+            )
+            emit(
+                "APP_DIAGNOSTIC",
+                {
+                    "level": "info",
+                    "message": summarize_download_sources("Torch wheel ", chosen_urls),
+                },
+            )
+            emit_status(
+                f"正在执行第 {index}/{len(commands)} 步（本地安装 Torch wheel）",
+                command=subprocess.list2cmdline(install_command),
+            )
+            return_code = runtime_installer.stream_command(install_command, include_extra_index=False)
+            if return_code != 0:
+                raise RuntimeError(f"环境配置失败，第 {index} 步退出码为 {return_code}。")
+            continue
+        if command == [["__DOWNLOAD_APP_WHEELS__"]]:
+            emit_status(f"正在执行第 {index}/{len(commands)} 步", command="download app wheels")
+            try:
+                wheel_paths, chosen_urls = runtime_installer.download_app_wheels(app_wheel_downloads, diagnostic_logger)
+                install_command = runtime_installer.install_app_wheels(
+                    wheel_paths,
+                    dependency_index=str(plan.get("pip_dependency_index") or ""),
+                    dependency_indexes=list(plan.get("pip_dependency_indexes") or []),
+                )
+                emit(
+                    "APP_DIAGNOSTIC",
+                    {
+                        "level": "info",
+                        "message": summarize_download_sources("应用依赖 wheel ", chosen_urls),
+                    },
+                )
+                emit_status(
+                    f"正在执行第 {index}/{len(commands)} 步（本地安装应用依赖 wheel）",
+                    command=subprocess.list2cmdline(install_command),
+                )
+                return_code = runtime_installer.stream_command(install_command, include_extra_index=False)
+                if return_code == 0:
+                    continue
+                emit(
+                    "APP_DIAGNOSTIC",
+                    {
+                        "level": "warning",
+                        "message": f"本地 wheel 安装失败，退出码 {return_code}，自动回退到普通 pip 多源安装。",
+                    },
+                )
+            except Exception as exc:
+                emit(
+                    "APP_DIAGNOSTIC",
+                    {
+                        "level": "warning",
+                        "message": f"应用依赖预下载失败，自动回退到普通 pip 多源安装：{exc}",
+                    },
+                )
+            alternatives = app_fallback_steps
+            include_extra_index = True
+            last_code = 0
+            for attempt_index, attempt_command in enumerate(alternatives, start=1):
+                emit_status(
+                    f"正在执行第 {index}/{len(commands)} 步（回退尝试 {attempt_index}/{len(alternatives)}）",
+                    command=subprocess.list2cmdline(attempt_command),
+                )
+                return_code = runtime_installer.stream_command(attempt_command, include_extra_index=include_extra_index)
+                if return_code == 0:
+                    last_code = 0
+                    break
+                last_code = return_code
+                emit(
+                    "APP_DIAGNOSTIC",
+                    {
+                        "level": "warning",
+                        "message": f"第 {index} 步回退源 {attempt_index} 失败，退出码 {return_code}，准备尝试下一个源。",
+                    },
+                )
+            if last_code != 0:
+                raise RuntimeError(f"环境配置失败，第 {index} 步退出码为 {last_code}。")
+            continue
         alternatives = command if command and isinstance(command[0], list) else [command]
+        include_extra_index = bool(extra_index_flags[index - 1]) if index <= len(extra_index_flags) else True
         last_code = 0
         for attempt_index, attempt_command in enumerate(alternatives, start=1):
             emit_status(
                 f"正在执行第 {index}/{len(commands)} 步（尝试 {attempt_index}/{len(alternatives)}）",
                 command=subprocess.list2cmdline(attempt_command),
             )
-            return_code = runtime_installer.stream_command(attempt_command)
+            return_code = runtime_installer.stream_command(attempt_command, include_extra_index=include_extra_index)
             if return_code == 0:
                 last_code = 0
                 break
@@ -171,10 +483,7 @@ def run_configure_env(args: argparse.Namespace) -> int:
         if last_code != 0:
             raise RuntimeError(f"环境配置失败，第 {index} 步退出码为 {last_code}。")
 
-    try:
-        report = runtime_preflight.run_runtime_preflight()
-    except Exception as exc:
-        report = runtime_preflight.build_broken_runtime_report(str(exc))
+    report = run_runtime_preflight_subprocess(include_extra_index=args.accelerator_mode != "legacy-cuda")
     report["system_nvidia"] = gpu
     report.update(accelerator_summary)
     runtime_backend = str(report.get("runtime_backend") or "cpu")
@@ -195,11 +504,13 @@ def run_configure_env(args: argparse.Namespace) -> int:
             },
         )
     emit("APP_DIAGNOSTIC", {"level": "info", "message": f"当前运行结果: {report.get('runtime_backend_label')}"})
+    validate_configured_runtime(plan, report)
+    runtime_installer.cleanup_download_cache(diagnostic_logger, remove_ready_wheels=True)
     emit(
         "RESULT",
         {
             "kind": "configure-env",
-            **{k: v for k, v in plan.items() if k != "commands"},
+            **_public_install_plan(plan),
             "pip_bootstrap_result": bootstrap_info,
             **report,
         },
@@ -213,6 +524,7 @@ def run_bootstrap_runtime(args: argparse.Namespace) -> int:
     report = runtime_installer.install_embedded_runtime(
         target_python,
         lambda message: emit("APP_DIAGNOSTIC", {"level": "info", "message": message}),
+        getattr(args, "accelerator_mode", "auto"),
     )
     emit("RESULT", {"kind": "bootstrap-runtime", **report})
     return 0
@@ -224,12 +536,21 @@ def run_bootstrap_runtime_and_configure(args: argparse.Namespace) -> int:
     report = runtime_installer.install_embedded_runtime(
         target_python,
         lambda message: emit("APP_DIAGNOSTIC", {"level": "info", "message": message}),
+        args.accelerator_mode,
     )
     emit("RESULT", {"kind": "bootstrap-runtime", **report})
 
-    command = [str(target_python), "-u", str(Path(__file__).resolve()), "configure-env"]
+    command = [
+        str(target_python),
+        "-u",
+        str(Path(__file__).resolve()),
+        "configure-env",
+        "--accelerator-mode",
+        args.accelerator_mode,
+    ]
     emit_status("内置 Python 已就绪，开始配置运行环境", command=subprocess.list2cmdline(command))
-    return_code = runtime_installer.stream_command(command)
+    include_extra_index = args.accelerator_mode != "legacy-cuda"
+    return_code = runtime_installer.stream_command(command, include_extra_index=include_extra_index)
     if return_code != 0:
         raise RuntimeError(f"内置 runtime 已创建，但环境配置失败，退出码为 {return_code}。")
     return 0
@@ -242,9 +563,12 @@ def run_train(args: argparse.Namespace) -> int:
     config_payload = load_json(args.config_json)
     validated_config = yolo_runner.validate_train_config_payload(args.task, config_payload)
     train_kwargs = yolo_runner.clean_kwargs({"data": args.data, **validated_config})
+    dataset_input = Path(args.data).expanduser().resolve()
+    dataset_image_count, validation_image_count = yolo_runner.validate_training_dataset_input(dataset_input, args.task)
 
     emit_status("开始训练", task=args.task, model=args.model, data=args.data)
     emit_status("训练参数已加载", config=args.config_json)
+    emit("APP_DIAGNOSTIC", {"level": "info", "message": f"数据集图片数：{dataset_image_count}，验证集图片数：{validation_image_count}"})
 
     weights_dir = yolo_runner.configure_weights_dir(args.weights_dir)
     if weights_dir is not None:
@@ -278,8 +602,11 @@ def run_val(args: argparse.Namespace) -> int:
     config_payload = load_json(args.config_json)
     validated_config = yolo_runner.clean_kwargs(config_payload)
     val_kwargs = yolo_runner.clean_kwargs({"data": args.data, **validated_config})
+    dataset_input = Path(args.data).expanduser().resolve()
+    dataset_image_count, validation_image_count = yolo_runner.validate_training_dataset_input(dataset_input, args.task)
 
     emit_status("开始验证", task=args.task, weights=args.weights, data=args.data)
+    emit("APP_DIAGNOSTIC", {"level": "info", "message": f"数据集图片数：{dataset_image_count}，验证集图片数：{validation_image_count}"})
     model = YOLO(args.weights, task=args.task or None)
     result = model.val(**val_kwargs)
     trainer = getattr(model, "validator", None)
@@ -469,53 +796,35 @@ def run_auto_label_detect(args: argparse.Namespace) -> int:
 
 
 def run_prepare_dataset(args: argparse.Namespace) -> int:
-    prepare_script = VENDOR_DIR / "prepare_detection_dataset.py"
-    command = [
-        sys.executable,
-        str(prepare_script),
-        "--input",
-        args.input,
-        "--output",
-        args.output,
-        "--format",
-        args.format,
-        "--val-ratio",
-        str(args.val_ratio),
-        "--seed",
-        str(args.seed),
-        "--copy-mode",
-        args.copy_mode,
-    ]
-    if args.class_names:
-        command.append("--class-names")
-        command.extend([item.strip() for item in args.class_names.split(",") if item.strip()])
-    if args.class_names_file:
-        command.extend(["--class-names-file", args.class_names_file])
-    if args.force:
-        command.append("--force")
-    if args.strict:
-        command.append("--strict")
+    from prepare_detection_dataset import run_from_args  # noqa: PLC0415
+
+    class_names = [item.strip() for item in args.class_names.split(",") if item.strip()] if args.class_names else None
+    prepare_args = SimpleNamespace(
+        input=args.input,
+        output=args.output,
+        format=args.format,
+        val_ratio=args.val_ratio,
+        seed=args.seed,
+        copy_mode=args.copy_mode,
+        class_names=class_names,
+        class_names_file=args.class_names_file or None,
+        force=args.force,
+        strict=args.strict,
+    )
 
     emit_status("开始整理数据集", input=args.input, output=args.output, format=args.format)
-    env = os.environ.copy()
-    env["YOLO_DESKTOP_PROTOCOL"] = "1"
-    env["PYTHONUTF8"] = "1"
-    env["PYTHONIOENCODING"] = "utf-8"
-    process = subprocess.Popen(
-        command,
-        cwd=str(APP_DIR),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        env=env,
-        creationflags=NO_WINDOW_FLAGS,
-    )
-    assert process.stdout is not None
-    for line in process.stdout:
-        print(line.rstrip(), flush=True)
-    return process.wait()
+    previous_protocol = os.environ.get("YOLO_DESKTOP_PROTOCOL")
+    os.environ["YOLO_DESKTOP_PROTOCOL"] = "1"
+    try:
+        return run_from_args(prepare_args)
+    except Exception as exc:
+        emit("ERROR", {"message": str(exc)})
+        return 1
+    finally:
+        if previous_protocol is None:
+            os.environ.pop("YOLO_DESKTOP_PROTOCOL", None)
+        else:
+            os.environ["YOLO_DESKTOP_PROTOCOL"] = previous_protocol
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -523,15 +832,33 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     subparsers.add_parser("check", help="检查当前 Python 环境")
+    subparsers.add_parser("runtime-preflight", help=argparse.SUPPRESS)
     configure = subparsers.add_parser("configure-env", help="自动安装推荐运行环境")
     configure.add_argument("--dry-run", action="store_true")
+    configure.add_argument(
+        "--accelerator-mode",
+        default="auto",
+        choices=("auto", "stable-cpu", "legacy-cuda"),
+        help="环境安装策略：auto 自动推荐，stable-cpu 稳定 CPU，legacy-cuda 老显卡 CUDA 兼容模式",
+    )
     bootstrap = subparsers.add_parser("bootstrap-runtime", help="在线创建内置 Python runtime")
     bootstrap.add_argument("--target-python", required=True)
+    bootstrap.add_argument(
+        "--accelerator-mode",
+        default="auto",
+        choices=("auto", "stable-cpu", "legacy-cuda"),
+        help="创建内置 runtime 时使用的环境策略；legacy-cuda 会选择更适合 cu118 的内置 Python。",
+    )
     bootstrap_and_configure = subparsers.add_parser(
         "bootstrap-runtime-and-configure",
         help="在线创建内置 Python runtime 并继续配置依赖环境",
     )
     bootstrap_and_configure.add_argument("--target-python", required=True)
+    bootstrap_and_configure.add_argument(
+        "--accelerator-mode",
+        default="auto",
+        choices=("auto", "stable-cpu", "legacy-cuda"),
+    )
 
     train = subparsers.add_parser("train", help="训练模型")
     train.add_argument("--task", required=True)
@@ -588,6 +915,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "check":
             return run_check(args)
+        if args.command == "runtime-preflight":
+            return run_runtime_preflight_command(args)
         if args.command == "configure-env":
             return run_configure_env(args)
         if args.command == "bootstrap-runtime":

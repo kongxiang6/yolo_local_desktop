@@ -65,6 +65,6 @@ coll = COLLECT(
     a.datas,
     strip=False,
     upx=not fast_build,
-    upx_exclude=[],
+    upx_exclude=["python3.dll", "python313.dll"],
     name=app_name,
 )

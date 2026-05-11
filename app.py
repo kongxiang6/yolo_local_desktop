@@ -20,6 +20,7 @@ from tkinter import filedialog, messagebox, scrolledtext, ttk
 from typing import Any
 
 from annotation_studio import AnnotationStudio
+from vendor_backend import runtime_installer
 
 
 APP_NAME = "YoloTool"
@@ -56,6 +57,10 @@ NO_WINDOW_FLAGS = CREATE_NO_WINDOW if os.name == "nt" else 0
 LOG_POLL_ACTIVE_MS = 40
 LOG_QUEUE_ITEMS_PER_TICK = 240
 LOG_VISIBLE_LINE_LIMIT = 2000
+LOG_TEXT_DEFAULT_HEIGHT = 18
+LOG_TEXT_COMPACT_HEIGHT = 12
+PROCESS_TERMINATE_WAIT_SECONDS = 2.0
+PROCESS_KILL_WAIT_SECONDS = 1.0
 
 
 def enable_windows_dpi_awareness() -> str | None:
@@ -794,6 +799,7 @@ class ToolTip:
 class SmartComboBox(tk.Frame):
     _open_instances: set["SmartComboBox"] = set()
     _bound_root: tk.Misc | None = None
+    _last_root_geometry: str | None = None
 
     def __init__(self, parent: tk.Widget, variable: tk.StringVar, values: list[str], *, readonly: bool = True) -> None:
         super().__init__(parent, bg=CARD_BG, highlightthickness=1, highlightbackground=BORDER, highlightcolor=PRIMARY)
@@ -851,11 +857,41 @@ class SmartComboBox(tk.Frame):
             except tk.TclError:
                 pass
             SmartComboBox._bound_root = None
+            SmartComboBox._last_root_geometry = None
         if SmartComboBox._bound_root is root:
             return
-        root.bind("<Configure>", lambda _event: SmartComboBox.close_all(), add="+")
+        root.bind("<Configure>", SmartComboBox._handle_root_configure, add="+")
         root.bind_all("<ButtonRelease-1>", SmartComboBox._close_on_global_click, add="+")
         SmartComboBox._bound_root = root
+
+    @classmethod
+    def _event_geometry_token(cls, event: tk.Event) -> str:
+        try:
+            width = int(getattr(event, "width", 0) or 0)
+            height = int(getattr(event, "height", 0) or 0)
+            x = int(getattr(event, "x", 0) or 0)
+            y = int(getattr(event, "y", 0) or 0)
+        except (TypeError, ValueError):
+            width = height = x = y = 0
+        if width > 1 and height > 1:
+            return f"{width}x{height}+{x}+{y}"
+        try:
+            return event.widget.winfo_geometry()
+        except tk.TclError:
+            return ""
+
+    @classmethod
+    def _handle_root_configure(cls, event: tk.Event) -> None:
+        if event.widget is not cls._bound_root:
+            return
+        geometry = cls._event_geometry_token(event)
+        if not geometry or geometry == cls._last_root_geometry:
+            return
+        cls._last_root_geometry = geometry
+        if cls._open_instances:
+            cls.close_all()
+        if ToolTip._open_instances:
+            ToolTip.hide_all()
 
     @classmethod
     def _close_on_global_click(cls, event: tk.Event) -> None:
@@ -895,6 +931,10 @@ class SmartComboBox(tk.Frame):
     def open_popup(self) -> None:
         if not self.values or not self.winfo_ismapped():
             return
+        try:
+            SmartComboBox._last_root_geometry = self.winfo_toplevel().winfo_geometry()
+        except tk.TclError:
+            SmartComboBox._last_root_geometry = None
         SmartComboBox.close_all(except_instance=self)
         popup = tk.Toplevel(self.winfo_toplevel())
         popup.wm_overrideredirect(True)
@@ -1221,6 +1261,7 @@ class App:
         self.export_contract = load_json(CONTRACT_DIR / "export_capabilities.json")
 
         self.process: subprocess.Popen[str] | None = None
+        self.thread_task_running = False
         self.log_queue: queue.Queue[tuple[str, object]] = queue.Queue()
         self._log_after_id: str | None = None
         self._visible_log_lines = 0
@@ -1308,6 +1349,7 @@ class App:
         self.annotation_tab_button: tk.Button | None = None
         self.annotation_page: tk.Frame | None = None
         self.annotation_editor: AnnotationStudio | None = None
+        self._annotation_view_initialized = False
         self.train_preset_combo: SmartComboBox | None = None
         self.export_preset_combo: SmartComboBox | None = None
         self.train_start_button: tk.Button | None = None
@@ -1347,6 +1389,8 @@ class App:
         self._refresh_run_action_buttons()
         self._refresh_status_visuals()
 
+        self._apply_responsive_log_height()
+        self.root.bind("<Configure>", self._handle_root_responsive_configure, add="+")
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _configure_window_geometry(self) -> None:
@@ -1472,7 +1516,7 @@ class App:
 
         log_box = self._create_box(self.left_panel, "实时日志")
         log_box["frame"].grid(row=2, column=0, sticky="nsew")
-        log_box["body"].grid_rowconfigure(1, weight=1)
+        log_box["body"].grid_rowconfigure(1, weight=1, minsize=280)
         log_box["body"].grid_columnconfigure(1, weight=1)
         self.left_log_state_entry = self._create_summary_row(log_box["body"], tk.StringVar(value="当前日志"), self.left_log_state_var, 0)
         ToolTip(self.left_log_state_entry, "这里显示当前任务的日志状态，例如等待开始、运行中、已完成或任务失败。")
@@ -1480,7 +1524,7 @@ class App:
         self.log_text = scrolledtext.ScrolledText(
             log_box["body"],
             wrap="word",
-            height=8,
+            height=LOG_TEXT_DEFAULT_HEIGHT,
             bg=CARD_SOFT,
             fg=TEXT,
             relief="flat",
@@ -1493,6 +1537,29 @@ class App:
         )
         self.log_text.grid(row=1, column=0, columnspan=2, sticky="nsew", padx=12, pady=(6, 12))
         self.log_text.configure(state="disabled")
+
+    def _handle_root_responsive_configure(self, event: tk.Event) -> None:
+        if event.widget is self.root:
+            self._apply_responsive_log_height()
+
+    def _apply_responsive_log_height(self) -> None:
+        if not hasattr(self, "log_text"):
+            return
+        try:
+            width = max(int(self.root.winfo_width()), int(self.root.winfo_screenwidth()))
+            height = int(self.root.winfo_height())
+        except (tk.TclError, TypeError, ValueError):
+            return
+
+        compact = width <= COMPACT_LAYOUT_WIDTH or height <= COMPACT_LAYOUT_HEIGHT
+        target_height = LOG_TEXT_COMPACT_HEIGHT if compact else LOG_TEXT_DEFAULT_HEIGHT
+        target_minsize = 210 if compact else 280
+        try:
+            if int(self.log_text.cget("height")) != target_height:
+                self.log_text.configure(height=target_height)
+            self.log_text.master.grid_rowconfigure(1, weight=1, minsize=target_minsize)
+        except tk.TclError:
+            return
 
     def _build_right_panel(self) -> None:
         tab_bar = tk.Frame(self.right_panel, bg=CARD_BG)
@@ -1569,7 +1636,6 @@ class App:
         self.export_scroll = ScrollableFrame(self.right_panel, background=CARD_BG)
         self.export_scroll.grid(row=1, column=0, sticky="nsew")
 
-        self._build_annotation_view(self.annotation_page)
         self._build_train_view(self.train_scroll.inner)
         self._build_export_view(self.export_scroll.inner)
 
@@ -1586,6 +1652,14 @@ class App:
             on_switch_to_train=self._open_train_workspace_from_annotation,
         )
         self.annotation_editor.pack(fill="both", expand=True)
+        self._annotation_view_initialized = True
+
+    def _ensure_annotation_view(self) -> None:
+        if self._annotation_view_initialized:
+            return
+        if self.annotation_page is None:
+            return
+        self._build_annotation_view(self.annotation_page)
 
     def _build_train_view(self, parent: tk.Widget) -> None:
         parent.grid_columnconfigure(0, weight=1)
@@ -2702,6 +2776,7 @@ class App:
 
         if self.annotation_page is not None:
             if tab == "annotation":
+                self._ensure_annotation_view()
                 self.annotation_page.grid()
             else:
                 self.annotation_page.grid_remove()
@@ -2915,6 +2990,10 @@ class App:
             return str(Path(weight_path).expanduser().resolve().parent)
         return "跟随权重目录"
 
+    def _set_string_var_if_changed(self, var: tk.StringVar, value: str) -> None:
+        if var.get() != value:
+            var.set(value)
+
     def _refresh_summary(self) -> None:
         if self.active_tab.get() == "annotation":
             workspace_label = "标注工作台"
@@ -2928,61 +3007,63 @@ class App:
                     project_dir = str(self.annotation_editor.project_dir)
                 current_image = self.annotation_editor.current_image_name()
                 preview = self.annotation_editor.export_preview_dir()
-            self.summary_label1.set("当前工作区")
-            self.summary_label2.set("当前目录/来源")
-            self.summary_label3.set("当前图片/输出预览")
-            self.summary_value1.set(workspace_label)
-            self.summary_value2.set(project_dir)
-            self.summary_value3.set(current_image if current_image != "未选择" else preview)
+            self._set_string_var_if_changed(self.summary_label1, "当前工作区")
+            self._set_string_var_if_changed(self.summary_label2, "当前目录/来源")
+            self._set_string_var_if_changed(self.summary_label3, "当前图片/输出预览")
+            self._set_string_var_if_changed(self.summary_value1, workspace_label)
+            self._set_string_var_if_changed(self.summary_value2, project_dir)
+            self._set_string_var_if_changed(self.summary_value3, current_image if current_image != "未选择" else preview)
             result_location = str(self.last_result_path) if self.last_result_path and self.last_result_path.exists() else (project_dir if project_dir != "\u672a\u9009\u62e9" else "")
-            self.result_location_var.set(result_location)
+            self._set_string_var_if_changed(self.result_location_var, result_location)
             self._refresh_run_action_buttons()
             return
 
         if self.active_tab.get() == "export":
-            self.summary_label1.set("权重")
-            self.summary_label2.set("任务类型")
-            self.summary_label3.set("输出目录")
-            self.summary_value1.set(self.export_weights_var.get() or "未选择")
-            self.summary_value2.set(self.export_task_label_var.get() or "自动识别")
+            self._set_string_var_if_changed(self.summary_label1, "权重")
+            self._set_string_var_if_changed(self.summary_label2, "任务类型")
+            self._set_string_var_if_changed(self.summary_label3, "输出目录")
+            self._set_string_var_if_changed(self.summary_value1, self.export_weights_var.get() or "未选择")
+            self._set_string_var_if_changed(self.summary_value2, self.export_task_label_var.get() or "自动识别")
             preview = str(self.last_result_path) if self.last_result_path and self.process_status_var.get() == "导出完成" else ""
-            self.summary_value3.set(preview or self._expected_export_target())
-            self.result_location_var.set(preview or self._expected_export_target())
+            final_preview = preview or self._expected_export_target()
+            self._set_string_var_if_changed(self.summary_value3, final_preview)
+            self._set_string_var_if_changed(self.result_location_var, final_preview)
             self._refresh_run_action_buttons()
             return
 
         action = self.train_action_var.get()
         if action == "train":
-            self.summary_label1.set("数据集")
-            self.summary_label2.set("模型")
-            self.summary_label3.set("预计输出目录")
-            self.summary_value1.set(self.train_data_var.get() or "暂无")
-            self.summary_value2.set(self.train_model_var.get() or "暂无")
+            self._set_string_var_if_changed(self.summary_label1, "数据集")
+            self._set_string_var_if_changed(self.summary_label2, "模型")
+            self._set_string_var_if_changed(self.summary_label3, "预计输出目录")
+            self._set_string_var_if_changed(self.summary_value1, self.train_data_var.get() or "暂无")
+            self._set_string_var_if_changed(self.summary_value2, self.train_model_var.get() or "暂无")
             preview = self._expected_train_output_dir()
         elif action == "val":
-            self.summary_label1.set("验证数据")
-            self.summary_label2.set("权重")
-            self.summary_label3.set("预计输出目录")
-            self.summary_value1.set(self.val_data_var.get() or "暂无")
-            self.summary_value2.set(self.val_weights_var.get() or "未选择")
+            self._set_string_var_if_changed(self.summary_label1, "验证数据")
+            self._set_string_var_if_changed(self.summary_label2, "权重")
+            self._set_string_var_if_changed(self.summary_label3, "预计输出目录")
+            self._set_string_var_if_changed(self.summary_value1, self.val_data_var.get() or "暂无")
+            self._set_string_var_if_changed(self.summary_value2, self.val_weights_var.get() or "未选择")
             preview = self._expected_val_output_dir()
         elif action == "predict":
-            self.summary_label1.set("预测源")
-            self.summary_label2.set("权重")
-            self.summary_label3.set("预计输出目录")
-            self.summary_value1.set(self.predict_source_var.get() or "未填写")
-            self.summary_value2.set(self.predict_weights_var.get() or "未选择")
+            self._set_string_var_if_changed(self.summary_label1, "预测源")
+            self._set_string_var_if_changed(self.summary_label2, "权重")
+            self._set_string_var_if_changed(self.summary_label3, "预计输出目录")
+            self._set_string_var_if_changed(self.summary_value1, self.predict_source_var.get() or "未填写")
+            self._set_string_var_if_changed(self.summary_value2, self.predict_weights_var.get() or "未选择")
             preview = self._expected_predict_output_dir()
         else:
-            self.summary_label1.set("跟踪源")
-            self.summary_label2.set("权重")
-            self.summary_label3.set("预计输出目录")
-            self.summary_value1.set(self.track_source_var.get() or "未填写")
-            self.summary_value2.set(self.track_weights_var.get() or "未选择")
+            self._set_string_var_if_changed(self.summary_label1, "跟踪源")
+            self._set_string_var_if_changed(self.summary_label2, "权重")
+            self._set_string_var_if_changed(self.summary_label3, "预计输出目录")
+            self._set_string_var_if_changed(self.summary_value1, self.track_source_var.get() or "未填写")
+            self._set_string_var_if_changed(self.summary_value2, self.track_weights_var.get() or "未选择")
             preview = self._expected_track_output_dir()
 
-        self.summary_value3.set(str(self.last_result_path) if self.last_result_path and self.process_status_var.get().endswith("完成") else preview)
-        self.result_location_var.set(str(self.last_result_path) if self.last_result_path and self.process_status_var.get().endswith("完成") else preview)
+        final_preview = str(self.last_result_path) if self.last_result_path and self.process_status_var.get().endswith("完成") else preview
+        self._set_string_var_if_changed(self.summary_value3, final_preview)
+        self._set_string_var_if_changed(self.result_location_var, final_preview)
         self._refresh_run_action_buttons()
 
     def _set_log_placeholder(self, mode: str) -> None:
@@ -3266,6 +3347,62 @@ class App:
     def _environment_dialog_needs_warning(self, payload: dict[str, Any]) -> bool:
         return self._runtime_needs_configuration(payload)
 
+    def _legacy_cuda_choice_available(self, payload: dict[str, Any]) -> bool:
+        gpu = payload.get("system_nvidia") or payload.get("gpu") or {}
+        if not isinstance(gpu, dict) or not gpu.get("available"):
+            return False
+        compatibility = runtime_installer.legacy_cuda_compatibility(
+            str(gpu.get("gpu_name") or ""),
+            str(gpu.get("gpu_architecture") or ""),
+            str(gpu.get("compute_capability") or ""),
+        )
+        return bool(compatibility.get("legacy_cuda_available"))
+
+    def _probe_local_nvidia_for_configuration(self) -> dict[str, Any]:
+        try:
+            gpu = runtime_installer.detect_nvidia_environment()
+        except Exception:
+            return {}
+        if not isinstance(gpu, dict) or not gpu.get("available"):
+            return {}
+        return {"system_nvidia": gpu, "gpu": gpu}
+
+    def _choose_accelerator_mode_for_configuration(self, probe: dict[str, Any]) -> str | None:
+        payload = probe.get("payload") if isinstance(probe.get("payload"), dict) else {}
+        has_hardware_probe = isinstance(payload, dict) and ("system_nvidia" in payload or "gpu" in payload)
+        if not has_hardware_probe and not self._legacy_cuda_choice_available(payload):
+            local_payload = self._probe_local_nvidia_for_configuration()
+            if self._legacy_cuda_choice_available(local_payload):
+                payload = local_payload
+        if not self._legacy_cuda_choice_available(payload):
+            return "auto"
+
+        gpu = payload.get("system_nvidia") or payload.get("gpu") or {}
+        gpu_name = str(gpu.get("gpu_name") or "NVIDIA 老显卡").strip()
+        architecture = str(gpu.get("gpu_architecture") or "旧架构").strip()
+        compatibility = runtime_installer.legacy_cuda_compatibility(
+            gpu_name,
+            architecture,
+            str(gpu.get("compute_capability") or ""),
+        )
+        capability = str(compatibility.get("compute_capability") or gpu.get("compute_capability") or "未知").strip()
+        compatibility_message = str(compatibility.get("message") or "").strip()
+        choice = messagebox.askyesnocancel(
+            "老显卡环境方案",
+            f"检测到 {gpu_name}（{architecture}，算力 {capability}）。\n\n"
+            "推荐选择“稳定 CPU 模式”：兼容性最好，训练和导出都能稳定运行。\n\n"
+            "如果你想尝试使用老显卡 CUDA，可以选择“是”，程序会进入兼容模式，"
+            "尝试安装 CUDA 11.8 相关轮子；该模式可能因为 Python / PyTorch 版本不匹配而失败。\n\n"
+            f"{compatibility_message}\n\n"
+            "选择：\n"
+            "是：老显卡 CUDA 兼容模式\n"
+            "否：稳定 CPU 模式（推荐）\n"
+            "取消：不配置环境",
+        )
+        if choice is None:
+            return None
+        return "legacy-cuda" if choice else "stable-cpu"
+
     def _run_quiet_backend_command(self, command: list[str]) -> tuple[int, list[str]]:
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
@@ -3373,19 +3510,19 @@ class App:
             f"{detail}\n\n仍要尝试自动配置环境吗？",
         )
 
-    def _start_configure_process(self, python_path: str) -> None:
-        if not Path(python_path).exists() and self._is_builtin_runtime_target(python_path) and is_frozen_app():
-            command = [
-                str(Path(sys.executable).resolve()),
-                BACKEND_LAUNCH_FLAG,
-                "bootstrap-runtime-and-configure",
-                "--target-python",
-                str(BUNDLED_RUNTIME_PYTHON),
-            ]
+    def _start_configure_process(self, python_path: str, accelerator_mode: str = "auto") -> None:
+        normalized_mode = runtime_installer.normalize_accelerator_mode(accelerator_mode)
+        should_bootstrap_runtime = (
+            self._is_builtin_runtime_target(python_path)
+            and is_frozen_app()
+            and (not Path(python_path).exists() or normalized_mode == "legacy-cuda")
+        )
+        if should_bootstrap_runtime:
             self.python_var.set(str(BUNDLED_RUNTIME_PYTHON))
+            self._start_bootstrap_runtime_and_configure_thread(normalized_mode)
         else:
-            command = [python_path, "-u", str(BACKEND), "configure-env"]
-        self._start_process(command, title="环境配置", mode_label="环境配置", preview_path=None)
+            command = [python_path, "-u", str(BACKEND), "configure-env", "--accelerator-mode", normalized_mode]
+            self._start_process(command, title="环境配置", mode_label="环境配置", preview_path=None)
 
     def _pick_file(self, variable: tk.StringVar) -> None:
         path = filedialog.askopenfilename()
@@ -3531,7 +3668,7 @@ class App:
         )
 
     def _refresh_run_action_buttons(self) -> None:
-        is_running = self.process is not None and self.process.poll() is None
+        is_running = self.thread_task_running or (self.process is not None and self.process.poll() is None)
         has_result = False
         result_location = self.result_location_var.get().strip()
         if result_location:
@@ -3848,10 +3985,13 @@ class App:
                 return
         elif not self._should_continue_after_probe(probe):
             return
+        accelerator_mode = self._choose_accelerator_mode_for_configuration(probe)
+        if accelerator_mode is None:
+            return
 
         self.left_result_var.set(f"正在配置内置环境：{python_path}")
         self.process_status_var.set("正在配置内置环境")
-        self._start_configure_process(python_path)
+        self._start_configure_process(python_path, accelerator_mode)
 
     def _handle_annotation_notice(self, message: str) -> None:
         notice = message.strip()
@@ -4160,7 +4300,7 @@ class App:
         return ",".join(lines)
 
     def _start_process(self, command: list[str], *, title: str, mode_label: str, preview_path: Path | None) -> None:
-        if self.process and self.process.poll() is None:
+        if self.thread_task_running or (self.process and self.process.poll() is None):
             messagebox.showinfo("任务进行中", "当前已有任务在运行，请先停止或等待完成。")
             return
 
@@ -4204,6 +4344,98 @@ class App:
 
         threading.Thread(target=self._pump_stdout, daemon=True).start()
         self._schedule_log_drain(LOG_POLL_ACTIVE_MS, reset=True)
+
+    def _start_bootstrap_runtime_and_configure_thread(self, accelerator_mode: str) -> None:
+        if self.thread_task_running or (self.process and self.process.poll() is None):
+            messagebox.showinfo("任务进行中", "当前已有任务在运行，请先停止或等待完成。")
+            return
+
+        target_python = BUNDLED_RUNTIME_PYTHON
+        configure_command = [
+            str(target_python),
+            "-u",
+            str(BACKEND),
+            "configure-env",
+            "--accelerator-mode",
+            accelerator_mode,
+        ]
+        self._close_log_handle()
+        self.current_log_path = self._create_log_path("环境配置")
+        self.current_log_handle = self.current_log_path.open("w", encoding="utf-8", buffering=1)
+        self.last_result_path = None
+        self.process_status_var.set("正在准备内置 Python 运行时")
+        self.left_log_state_var.set("正在准备内置 Python 运行时")
+        self.left_result_var.set("任务已启动")
+        self.result_location_var.set("")
+        self._clear_log_text()
+        self._append_log("=== 环境配置 ===")
+        self._append_log(f"内置 Python: {target_python}")
+        self._append_log("后续命令: " + subprocess.list2cmdline(configure_command))
+        self.thread_task_running = True
+        self._refresh_run_action_buttons()
+        threading.Thread(
+            target=self._bootstrap_runtime_and_configure_worker,
+            args=(target_python, accelerator_mode, configure_command),
+            daemon=True,
+        ).start()
+        self._schedule_log_drain(LOG_POLL_ACTIVE_MS, reset=True)
+
+    def _bootstrap_runtime_and_configure_worker(
+        self,
+        target_python: Path,
+        accelerator_mode: str,
+        configure_command: list[str],
+    ) -> None:
+        exit_code = 1
+        try:
+            self._queue_protocol("STATUS", {"message": "正在准备内置 Python 运行时", "target_python": str(target_python)})
+            report = runtime_installer.install_embedded_runtime(
+                target_python,
+                lambda message: self._queue_protocol("APP_DIAGNOSTIC", {"level": "info", "message": message}),
+                accelerator_mode,
+            )
+            self._queue_protocol("RESULT", {"kind": "bootstrap-runtime", **report})
+            self._queue_protocol(
+                "STATUS",
+                {
+                    "message": "内置 Python 已就绪，开始配置运行环境",
+                    "command": subprocess.list2cmdline(configure_command),
+                },
+            )
+            exit_code = self._run_thread_subprocess(configure_command, include_extra_index=accelerator_mode != "legacy-cuda")
+        except Exception as exc:
+            self._queue_protocol("ERROR", {"message": str(exc)})
+            exit_code = 1
+        finally:
+            self.log_queue.put(("thread_exit", exit_code))
+
+    def _queue_protocol(self, tag: str, payload: dict[str, object]) -> None:
+        self.log_queue.put(("line", f"[{tag}] {json.dumps(payload, ensure_ascii=False)}"))
+
+    def _run_thread_subprocess(self, command: list[str], *, include_extra_index: bool = True) -> int:
+        env = os.environ.copy()
+        env["PYTHONUNBUFFERED"] = "1"
+        env["PYTHONUTF8"] = "1"
+        env["PYTHONIOENCODING"] = "utf-8"
+        env["PIP_NO_INPUT"] = "1"
+        if not include_extra_index:
+            env.pop("PIP_EXTRA_INDEX_URL", None)
+        process = subprocess.Popen(
+            command,
+            cwd=str(WORK_DIR),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
+            creationflags=NO_WINDOW_FLAGS,
+        )
+        self.process = process
+        assert process.stdout is not None
+        for line in process.stdout:
+            self.log_queue.put(("line", line.rstrip()))
+        return process.wait()
 
     def _create_log_path(self, title: str) -> Path:
         logs_dir = WORK_DIR / "logs"
@@ -4259,10 +4491,12 @@ class App:
             processed += 1
             if kind == "line":
                 pending_lines.append(str(payload))
-            elif kind == "exit":
+            elif kind in {"exit", "thread_exit"}:
                 flush_lines()
                 self._append_log(f"退出码: {payload}")
                 self.process = None
+                if kind == "thread_exit":
+                    self.thread_task_running = False
                 if str(payload) == "0":
                     self.left_log_state_var.set("已完成")
                     if self.process_status_var.get() == "任务已启动":
@@ -4274,7 +4508,7 @@ class App:
         flush_lines()
 
         has_backlog = not self.log_queue.empty()
-        keep_draining = (self.process and self.process.poll() is None) or has_backlog
+        keep_draining = self.thread_task_running or (self.process and self.process.poll() is None) or has_backlog
         try:
             if keep_draining and self.root.winfo_exists():
                 self._log_after_id = self.root.after(LOG_POLL_ACTIVE_MS, self._drain_logs)
@@ -4468,12 +4702,53 @@ class App:
             self.current_log_handle = None
         self._refresh_run_action_buttons()
 
+    def _force_kill_process_tree(self, process: subprocess.Popen[str]) -> None:
+        if process.poll() is not None:
+            return
+        if os.name == "nt":
+            try:
+                subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=NO_WINDOW_FLAGS, check=False)
+                return
+            except OSError:
+                pass
+        try:
+            process.kill()
+        except OSError:
+            pass
+
+    def _terminate_active_process(self, *, wait_timeout: float = PROCESS_TERMINATE_WAIT_SECONDS) -> bool:
+        process = self.process
+        if process is None:
+            return True
+        if process.poll() is not None:
+            self.process = None
+            return True
+        try:
+            process.terminate()
+        except OSError:
+            pass
+        try:
+            process.wait(timeout=wait_timeout)
+        except subprocess.TimeoutExpired:
+            self._force_kill_process_tree(process)
+            try:
+                process.wait(timeout=PROCESS_KILL_WAIT_SECONDS)
+            except subprocess.TimeoutExpired:
+                return False
+        self.process = None
+        return True
+
     def stop_process(self) -> None:
         if self.process and self.process.poll() is None:
-            self.process.terminate()
+            self._terminate_active_process(wait_timeout=1.0)
             self.process_status_var.set("已取消")
             self.left_log_state_var.set("已取消")
             self._append_log("已发送停止信号。")
+            self._refresh_run_action_buttons()
+        elif self.thread_task_running:
+            self.process_status_var.set("正在停止")
+            self.left_log_state_var.set("正在停止")
+            self._append_log("内置 Python 准备阶段无法立即中断，稍后会自动结束。")
             self._refresh_run_action_buttons()
 
     def open_result_location(self) -> None:
@@ -4509,10 +4784,10 @@ class App:
             except tk.TclError:
                 pass
             self._log_after_id = None
-        if self.process and self.process.poll() is None:
+        if self.thread_task_running or (self.process and self.process.poll() is None):
             if not messagebox.askyesno("确认退出", "当前任务仍在运行，确定退出吗？"):
                 return
-            self.process.terminate()
+        self._terminate_active_process()
         self._close_log_handle()
         for path in self.temp_files:
             try:
@@ -4538,21 +4813,28 @@ def apply_window_icon(root: tk.Tk) -> None:
         pass
 
 
+def safe_launcher_print(text: str) -> None:
+    try:
+        print(text, flush=True)
+    except (OSError, ValueError):
+        pass
+
+
 def run_backend_command_from_launcher(argv: list[str]) -> int:
     if not BACKEND.exists():
-        print(f"[ERROR] 后端脚本不存在：{BACKEND}", flush=True)
+        safe_launcher_print(f"[ERROR] 后端脚本不存在：{BACKEND}")
         return 1
 
     spec = importlib.util.spec_from_file_location("yolo_local_desktop_backend", BACKEND)
     if spec is None or spec.loader is None:
-        print(f"[ERROR] 无法加载后端脚本：{BACKEND}", flush=True)
+        safe_launcher_print(f"[ERROR] 无法加载后端脚本：{BACKEND}")
         return 1
 
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     backend_main = getattr(module, "main", None)
     if not callable(backend_main):
-        print(f"[ERROR] 后端入口无效：{BACKEND}", flush=True)
+        safe_launcher_print(f"[ERROR] 后端入口无效：{BACKEND}")
         return 1
     return int(backend_main(argv))
 
