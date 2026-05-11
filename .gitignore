@@ -16,4 +16,8 @@ presets/**/*.json
 presets/**/selftest_*.json
 
 designs/__pycache__/
+designs/**/*.png
 _local/
+
+# Local design drafts and UI audit screenshots are not part of the public source release.
+designs/
