@@ -54,6 +54,18 @@ root.update()
 assert ui.left_panel.winfo_ismapped(), "train tab should restore the outer summary panel"
 assert int(ui.right_panel.grid_info().get("columnspan", 1)) == 1, "train tab should restore the split layout"
 
+ui._show_tab("annotation")
+root.update_idletasks()
+root.update()
+assert not ui.left_panel.winfo_ismapped(), "annotation tab should hide the outer summary panel"
+assert int(ui.right_panel.grid_info().get("columnspan", 1)) == 2, "annotation tab should expand to the full content width"
+
+ui._show_tab("train")
+root.update_idletasks()
+root.update()
+assert ui.left_panel.winfo_ismapped(), "train tab should restore the outer summary panel"
+assert int(ui.right_panel.grid_info().get("columnspan", 1)) == 1, "train tab should restore the split layout"
+
 
 def walk(widget):
     for child in widget.winfo_children():
