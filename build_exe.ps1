@@ -1,4 +1,4 @@
-﻿param(
+param(
     [switch]$Full,
     [switch]$IncludeRuntime,
     [string]$RuntimeSource,

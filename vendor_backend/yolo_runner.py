@@ -445,7 +445,7 @@ def collect_unsupported_export_warnings(args: argparse.Namespace, supported_args
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Dear ImGui YOLO 桌面端后端执行器。")
+    parser = argparse.ArgumentParser(description="YOLO训练工具后端执行器。")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     train = subparsers.add_parser("train", help="训练 YOLO 模型。")
