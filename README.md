@@ -124,4 +124,3 @@ python -m py_compile app.py app_v2.py backend.py `
 - `build_exe.ps1`：统一打包脚本
 - `delivery/README_FOR_SHARE.txt`：分发包附带说明
 - `YOLO训练工具操作说明.txt`：面向最终用户的中文操作说明
-- `_local/YOLO_TRAINING_TOOL_SESSION_CONTEXT.md`：本地会话承接文档，不进仓库，不参与打包

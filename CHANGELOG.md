@@ -9,7 +9,7 @@
 - 统一原版与 V2 的完整发布流程，统一改走 `build_exe.ps1 + spec`。
 - 默认完整发布包不再附带 `runtime`，降低分发体积与重复拷贝成本。
 - 默认完整发布目录不再附带 `presets` 文件夹。
-- 更新 `README.md`、`YOLO训练工具操作说明.txt`、`delivery/README_FOR_SHARE.txt` 和本地会话承接文档，确保说明与当前发布规制一致。
+- 更新 `README.md`、`YOLO训练工具操作说明.txt` 和 `delivery/README_FOR_SHARE.txt`，确保说明与当前发布规制一致。
 
 ### Fixed
 
