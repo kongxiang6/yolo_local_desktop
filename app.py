@@ -526,13 +526,25 @@ def resolve_work_dir() -> Path:
     return Path(__file__).resolve().parent
 
 
+def resolve_local_state_dir(work_dir: Path) -> Path:
+    override = os.environ.get("YOLO_TOOL_STATE_DIR", "").strip()
+    if override:
+        return Path(override).expanduser()
+    if getattr(sys, "frozen", False):
+        base = os.environ.get("LOCALAPPDATA", "").strip() or os.environ.get("APPDATA", "").strip()
+        if base:
+            return Path(base) / APP_NAME / "state"
+    return work_dir / "_local"
+
+
 RESOURCE_DIR = resolve_resource_dir()
 WORK_DIR = resolve_work_dir()
+LOCAL_STATE_DIR = resolve_local_state_dir(WORK_DIR)
 BACKEND = RESOURCE_DIR / "backend.py"
 CONTRACT_DIR = RESOURCE_DIR / "contracts"
 PRESET_ROOT = WORK_DIR / "presets"
-ANNOTATION_SESSION_PATH = WORK_DIR / "_local" / "annotation_sessions.json"
-SEGMENTATION_SESSION_PATH = WORK_DIR / "_local" / "segmentation_sessions.json"
+ANNOTATION_SESSION_PATH = LOCAL_STATE_DIR / "annotation_sessions.json"
+SEGMENTATION_SESSION_PATH = LOCAL_STATE_DIR / "segmentation_sessions.json"
 ICON_PNG = RESOURCE_DIR / "assets" / "yolotool_icon.png"
 ICON_ICO = RESOURCE_DIR / "assets" / "yolotool_icon.ico"
 BUNDLED_RUNTIME_DIR = WORK_DIR / "runtime" / "python"

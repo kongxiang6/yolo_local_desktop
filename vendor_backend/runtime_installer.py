@@ -11,6 +11,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import sysconfig
 import tempfile
 import threading
 import time
@@ -920,11 +921,11 @@ def has_ensurepip() -> bool:
 
 
 def detect_pip_bootstrap_strategy() -> str:
-    if has_pip():
+    if has_pip() and pip_is_usable():
         return "已检测到 pip，可直接安装依赖"
     if has_ensurepip():
         return "当前 Python 支持 ensurepip，会先本地初始化 pip"
-    return "当前 Python 不带 ensurepip，将自动在线下载 get-pip.py 安装 pip"
+    return "当前 Python 不带 ensurepip，将优先用 pip/setuptools/wheel 的本地 wheel 引导 pip，失败后再回退 get-pip.py"
 
 
 def _run_capture(command: list[str]) -> subprocess.CompletedProcess[str]:
@@ -1909,23 +1910,128 @@ def download_get_pip(target_dir: Path | None = None) -> Path:
     return target_path
 
 
+def pip_is_usable() -> bool:
+    if not has_pip():
+        return False
+    try:
+        result = _run_capture([sys.executable, "-m", "pip", "--version"])
+    except Exception:
+        return False
+    return result.returncode == 0
+
+
+def site_packages_dir() -> Path:
+    purelib = sysconfig.get_paths().get("purelib", "")
+    if purelib:
+        return Path(purelib)
+    return Path(sys.prefix) / "Lib" / "site-packages"
+
+
+def _cleanup_extracted_bootstrap_package(site_packages: Path, package: str) -> None:
+    normalized = package.replace("-", "_").lower()
+    candidates = [
+        site_packages / normalized,
+        site_packages / package.lower(),
+    ]
+    patterns = [
+        f"{normalized}-*.dist-info",
+        f"{package.lower()}-*.dist-info",
+    ]
+    if normalized == "setuptools":
+        candidates.extend([site_packages / "_distutils_hack", site_packages / "distutils-precedence.pth"])
+    for candidate in candidates:
+        try:
+            if candidate.is_dir():
+                shutil.rmtree(candidate, ignore_errors=True)
+            elif candidate.exists():
+                candidate.unlink(missing_ok=True)
+        except OSError:
+            pass
+    for pattern in patterns:
+        for candidate in site_packages.glob(pattern):
+            try:
+                if candidate.is_dir():
+                    shutil.rmtree(candidate, ignore_errors=True)
+                else:
+                    candidate.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def _extract_bootstrap_wheel(wheel_path: Path, site_packages: Path) -> None:
+    with zipfile.ZipFile(wheel_path) as wheel:
+        wheel.extractall(site_packages)
+
+
+def bootstrap_pip_from_wheels(log: Callable[[str], None] | None = None) -> dict[str, str]:
+    logger = log or (lambda _message: None)
+    logger("正在尝试使用本地 wheel 引导 pip，避免 get-pip.py 在新版本 Python 中依赖 distutils 失败。")
+    indexes = rank_candidate_urls(build_generic_pip_index_candidates(), logger)
+    downloads = build_python_wheel_downloads(
+        ("setuptools", "pip", "wheel"),
+        indexes,
+        cache_dirname=PYTHON_WHEEL_CACHE_DIRNAME,
+        log=logger,
+    )
+    packages = {str(item.get("package") or "").lower(): item for item in downloads}
+    required = ("setuptools", "pip", "wheel")
+    missing = [package for package in required if package not in packages]
+    if missing:
+        raise RuntimeError("无法解析 pip 引导 wheel：" + ", ".join(missing))
+
+    site_packages = site_packages_dir()
+    site_packages.mkdir(parents=True, exist_ok=True)
+    extracted: list[str] = []
+    for package in required:
+        item = packages[package]
+        wheel_path, _chosen_url = download_file(
+            [str(url) for url in item.get("urls") or []],
+            Path(item["target_path"]),
+            logger,
+            prefer_segmented=True,
+            rank_sources=False,
+        )
+        _cleanup_extracted_bootstrap_package(site_packages, package)
+        _extract_bootstrap_wheel(wheel_path, site_packages)
+        extracted.append(wheel_path.name)
+        logger(f"已解压 pip 引导 wheel：{wheel_path.name}")
+
+    importlib.invalidate_caches()
+    if not pip_is_usable():
+        raise RuntimeError("已解压 pip 引导 wheel，但当前解释器仍无法运行 pip。")
+    logger("本地 wheel 引导 pip 成功。")
+    return {
+        "method": "wheel-bootstrap",
+        "message": "已通过 pip/setuptools/wheel 本地 wheel 引导 pip。",
+        "site_packages": str(site_packages),
+        "wheels": ", ".join(extracted),
+    }
+
+
 def bootstrap_pip(log: Callable[[str], None] | None = None) -> dict[str, str]:
     logger = log or (lambda _message: None)
 
-    if has_pip():
+    if has_pip() and pip_is_usable():
         logger("已检测到 pip，跳过引导步骤。")
         return {"method": "existing", "message": "已检测到 pip，直接继续安装依赖。"}
+    if has_pip():
+        logger("检测到 pip 包但无法正常运行，将尝试修复 pip。")
 
     ensurepip_command = [sys.executable, "-m", "ensurepip", "--upgrade"]
     if has_ensurepip():
         logger("检测到 ensurepip，正在本地初始化 pip。")
         return_code = stream_command(ensurepip_command)
-        if return_code == 0 and has_pip():
+        if return_code == 0 and pip_is_usable():
             logger("ensurepip 初始化成功。")
             return {"method": "ensurepip", "message": "已通过 ensurepip 初始化 pip。"}
-        logger("ensurepip 初始化失败，改为在线下载 get-pip.py 安装 pip。")
+        logger("ensurepip 初始化失败，改为本地 wheel 引导 pip。")
     else:
-        logger("当前 Python 不包含 ensurepip，改为在线下载 get-pip.py 安装 pip。")
+        logger("当前 Python 不包含 ensurepip，改为本地 wheel 引导 pip。")
+
+    try:
+        return bootstrap_pip_from_wheels(logger)
+    except Exception as wheel_exc:
+        logger(f"本地 wheel 引导 pip 失败，改为在线下载 get-pip.py 安装 pip：{wheel_exc}")
 
     logger("正在下载 pip 引导脚本（优先尝试国内镜像）")
     script_path = download_get_pip()
@@ -1934,8 +2040,8 @@ def bootstrap_pip(log: Callable[[str], None] | None = None) -> dict[str, str]:
     install_command = [sys.executable, str(script_path), "--disable-pip-version-check"]
     return_code = stream_command(install_command)
     if return_code != 0:
-        raise RuntimeError(f"在线安装 pip 失败，退出码为 {return_code}。")
-    if not has_pip():
+        raise RuntimeError(f"在线安装 pip 失败，退出码为 {return_code}。本地 wheel 引导也已失败，请查看上方日志。")
+    if not pip_is_usable():
         raise RuntimeError("在线安装 pip 已执行完成，但当前解释器仍未检测到 pip。")
 
     logger("在线安装 pip 成功。")
@@ -2104,8 +2210,8 @@ def build_install_plan(
             "用户也可以手动选择老显卡 CUDA 兼容模式，程序会切换到更适合 cu118 的内置 Python 版本，并尝试 CUDA 11.8 轮子。",
             "如果检测到 Blackwell / Ada / Hopper / Ampere / Turing 等显卡，但 nvidia-smi 没有返回 CUDA 版本，会优先按 cu128 显卡方案处理。",
             "如果现有 Torch 类型和推荐方案不一致，会自动重装 Torch，避免 CPU 版残留导致显卡不可用。",
-            "如果当前 Python 没有 pip，会自动尝试 ensurepip；若不可用，则在线下载 get-pip.py 安装。",
-            "内置 Python、get-pip 和 pip 镜像会先测速，再优先走响应更快的国内源；不可用时再自动回退。",
+            "如果当前 Python 没有 pip，会自动尝试 ensurepip；若不可用，则优先用 pip/setuptools/wheel 的本地 wheel 引导，最后再回退 get-pip.py。",
+            "内置 Python、pip 引导 wheel、get-pip 和 pip 镜像会先测速，再优先走响应更快的国内源；不可用时再自动回退。",
             "PyTorch CUDA 轮子会按测速结果优先尝试更快的镜像源，再回退官方源。",
             "显卡版 PyTorch 安装会使用隔离 pip 模式，避免普通 PyPI 源把 CUDA 方案替换成 CPU 版 Torch。",
             "Ultralytics / OpenCV / Matplotlib 等应用依赖会优先并行预下载 wheel，再从本地缓存安装，避免单个 pip 源拖慢整体流程。",

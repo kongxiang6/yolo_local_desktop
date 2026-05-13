@@ -19,11 +19,7 @@ $releaseDir = $null
 $resolvedSpecPath = [System.IO.Path]::GetFullPath((Join-Path $project $SpecPath))
 $specBaseName = [System.IO.Path]::GetFileNameWithoutExtension($resolvedSpecPath)
 $releaseZipPath = Join-Path $releaseRoot "${specBaseName}_release.zip"
-$expectedDistName = $null
-switch ($specBaseName) {
-    'yolo_local_desktop' { $expectedDistName = 'YOLO训练工具' }
-    'yolo_local_desktop_v2' { $expectedDistName = 'YOLO训练工具_V2' }
-}
+$expectedDistSuffix = if ($specBaseName -eq 'yolo_local_desktop_v2') { '_V2' } else { '' }
 
 if (-not (Test-Path -LiteralPath $resolvedSpecPath)) {
     throw "Spec file was not found: $resolvedSpecPath"
@@ -100,14 +96,17 @@ if ($LASTEXITCODE -ne 0) {
     throw "PyInstaller failed with exit code $LASTEXITCODE"
 }
 
-if ($expectedDistName) {
-    $distRoot = Join-Path $distRootParent $expectedDistName
+$distCandidates = Get-ChildItem -LiteralPath $distRootParent -Directory -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -like 'YOLO*' }
+if ($expectedDistSuffix) {
+    $distCandidates = $distCandidates | Where-Object { $_.Name -like "*$expectedDistSuffix" }
 }
-if (-not $distRoot -or -not (Test-Path -LiteralPath $distRoot)) {
-    $distRoot = Get-ChildItem -LiteralPath $distRootParent -Directory -ErrorAction SilentlyContinue |
-        Sort-Object LastWriteTime -Descending |
-        Select-Object -First 1 -ExpandProperty FullName
+else {
+    $distCandidates = $distCandidates | Where-Object { $_.Name -notlike '*_V2' }
 }
+$distRoot = $distCandidates |
+    Sort-Object LastWriteTime -Descending |
+    Select-Object -First 1 -ExpandProperty FullName
 if (-not $distRoot -or -not (Test-Path -LiteralPath $distRoot)) {
     throw 'PyInstaller did not produce the expected dist directory.'
 }
@@ -153,9 +152,11 @@ if ($IncludeRuntime -and -not (Test-Path -LiteralPath (Join-Path $distRuntime 'p
 if (Test-Path -LiteralPath (Join-Path $deliveryDir 'README_FOR_SHARE.txt')) {
     Copy-Item -LiteralPath (Join-Path $deliveryDir 'README_FOR_SHARE.txt') -Destination (Join-Path $distRoot 'README_FOR_SHARE.txt') -Force
 }
-$localGuide = Join-Path $project 'YOLO训练工具操作说明.txt'
-if (Test-Path -LiteralPath $localGuide) {
-    Copy-Item -LiteralPath $localGuide -Destination (Join-Path $distRoot (Split-Path $localGuide -Leaf)) -Force
+$localGuide = Get-ChildItem -LiteralPath $project -File -Filter 'YOLO*.txt' -ErrorAction SilentlyContinue |
+    Sort-Object LastWriteTime -Descending |
+    Select-Object -First 1
+if ($localGuide) {
+    Copy-Item -LiteralPath $localGuide.FullName -Destination (Join-Path $distRoot $localGuide.Name) -Force
 }
 $licenseFile = Join-Path $project 'LICENSE'
 if (Test-Path -LiteralPath $licenseFile) {
