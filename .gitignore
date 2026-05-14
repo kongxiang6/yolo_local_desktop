@@ -6,6 +6,7 @@ build/
 dist/
 release/
 logs/
+.pyinstaller_cache/
 .runtime_source_path.txt
 
 runtime/

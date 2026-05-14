@@ -113,6 +113,13 @@ FALLBACK_HOST_KEYWORDS = (
     "pythonhosted.org",
     "download.pytorch.org",
 )
+FLAKY_PYPI_FILE_HOST_KEYWORDS = (
+    # These mirrors can have a very fast simple-index response while some wheel
+    # file URLs return 403, especially for ranged requests. Keep them as
+    # fallbacks, but prefer mirrors that actually serve wheel bytes first.
+    "mirrors.tuna.tsinghua.edu.cn",
+    "mirrors.bfsu.edu.cn",
+)
 
 
 def dedupe_candidates(candidates: list[str]) -> list[str]:
@@ -732,18 +739,26 @@ def _sort_urls_by_index_order(urls: list[str], indexes: list[str]) -> list[str]:
         for index_url in indexes
     ]
 
-    def order_key(url: str) -> tuple[int, int, str]:
+    def file_host_penalty(url: str) -> int:
+        parsed = urlparse(url)
+        host = (parsed.netloc or "").lower()
+        path = (parsed.path or "").lower()
+        if "/packages/" in path and any(keyword in host for keyword in FLAKY_PYPI_FILE_HOST_KEYWORDS):
+            return 1
+        return 0
+
+    def order_key(url: str) -> tuple[int, int, int, str]:
         normalized_url = url.rstrip("/")
         url_host = (urlparse(url).netloc or "").lower()
         for index, (base, host) in enumerate(normalized_indexes):
             if normalized_url.startswith(base):
-                return index, 0, normalized_url
+                return file_host_penalty(url), index, 0, normalized_url
             # Mirror simple pages often point to wheel files under another path
             # on the same host, e.g. `/pypi/packages/...` instead of `/simple/...`.
             # Keep those URLs ahead of third-party hosts such as pythonhosted.org.
             if host and url_host == host:
-                return index, 1, normalized_url
-        return len(normalized_indexes), 2, normalized_url
+                return file_host_penalty(url), index, 1, normalized_url
+        return file_host_penalty(url), len(normalized_indexes), 2, normalized_url
 
     return sorted(dedupe_candidates(urls), key=order_key)
 
@@ -890,9 +905,12 @@ def _process_env(*, include_extra_index: bool = True) -> dict[str, str]:
         {
             "PYTHONUTF8": "1",
             "PYTHONIOENCODING": "utf-8",
+            "PYTHONNOUSERSITE": "1",
             "PIP_DISABLE_PIP_VERSION_CHECK": "1",
             "PIP_DEFAULT_TIMEOUT": "180",
             "PIP_NO_INPUT": "1",
+            "PIP_NO_USER": "1",
+            "PIP_NO_WARN_SCRIPT_LOCATION": "1",
             "PIP_RETRIES": "5",
             "PIP_PREFER_BINARY": "1",
         }
@@ -1185,6 +1203,20 @@ def _format_mb(byte_count: int | float | None) -> str:
     return f"{float(byte_count) / 1024 / 1024:.1f} MB"
 
 
+def _download_error_is_retryable(exc: Exception) -> bool:
+    if isinstance(exc, urllib.error.HTTPError):
+        # These status codes mean the current URL/source is not usable. Retrying
+        # every segment only makes the UI look frozen, so switch source at once.
+        return exc.code not in {401, 403, 404, 410}
+    return True
+
+
+def _download_error_summary(exc: Exception) -> str:
+    if isinstance(exc, urllib.error.HTTPError) and not _download_error_is_retryable(exc):
+        return f"当前源返回 HTTP {exc.code}，已判定为不可重试错误"
+    return str(exc)
+
+
 def _download_range_to_path(url: str, start: int, end: int, segment_path: Path) -> None:
     downloaded = segment_path.stat().st_size if segment_path.exists() else 0
     expected_size = end - start + 1
@@ -1376,6 +1408,7 @@ def _download_url_to_path_segmented(
         while not stop_event.wait(DOWNLOAD_PROGRESS_INTERVAL_SECONDS):
             emit_progress()
 
+    source_failed_event = threading.Event()
     monitor_thread = threading.Thread(target=monitor_progress, daemon=True)
     monitor_thread.start()
     try:
@@ -1383,18 +1416,28 @@ def _download_url_to_path_segmented(
             def download_range_with_retries(start: int, end: int, segment_path: Path) -> None:
                 last_error: Exception | None = None
                 for attempt in range(1, SEGMENTED_DOWNLOAD_SEGMENT_RETRIES + 1):
+                    if source_failed_event.is_set():
+                        raise RuntimeError("当前下载源已判定不可用，跳过剩余分段。")
                     try:
                         _download_range_to_path(url, start, end, segment_path)
                         return
                     except Exception as exc:
                         last_error = exc
+                        if not _download_error_is_retryable(exc):
+                            source_failed_event.set()
+                            logger(
+                                f"当前下载源拒绝访问或文件不存在，立即切换下一个源："
+                                f"{segment_path.name}（{_download_error_summary(exc)}）"
+                            )
+                            break
                         if attempt >= SEGMENTED_DOWNLOAD_SEGMENT_RETRIES:
                             break
                         logger(
                             f"分段下载短暂卡住，正在重试当前分段 "
                             f"{segment_path.name}（{attempt + 1}/{SEGMENTED_DOWNLOAD_SEGMENT_RETRIES}）：{exc}"
                         )
-                        time.sleep(min(2.0 * attempt, 8.0))
+                        if source_failed_event.wait(min(2.0 * attempt, 8.0)):
+                            break
                 assert last_error is not None
                 raise last_error
 
@@ -1403,7 +1446,13 @@ def _download_url_to_path_segmented(
                 for start, end, segment_path in ranges
             }
             for future in as_completed(future_map):
-                future.result()
+                try:
+                    future.result()
+                except Exception:
+                    source_failed_event.set()
+                    for pending_future in future_map:
+                        pending_future.cancel()
+                    raise
                 progress_state["completed"] = int(progress_state["completed"]) + 1
                 emit_progress(force=True)
 
@@ -1639,6 +1688,8 @@ def install_app_wheels(
         "pip",
         "install",
         "--upgrade",
+        "--no-user",
+        "--no-warn-script-location",
         "--prefer-binary",
         "--no-compile",
         "--timeout",
@@ -1666,6 +1717,8 @@ def install_tool_wheels(wheel_paths: list[Path]) -> list[str]:
         "pip",
         "install",
         "--upgrade",
+        "--no-user",
+        "--no-warn-script-location",
         "--prefer-binary",
         "--no-compile",
         "--timeout",
@@ -1697,6 +1750,8 @@ def install_torch_wheels(
         "--isolated",
         "install",
         "--upgrade",
+        "--no-user",
+        "--no-warn-script-location",
         "--prefer-binary",
         "--no-compile",
         "--timeout",
@@ -2017,7 +2072,7 @@ def bootstrap_pip(log: Callable[[str], None] | None = None) -> dict[str, str]:
     if has_pip():
         logger("检测到 pip 包但无法正常运行，将尝试修复 pip。")
 
-    ensurepip_command = [sys.executable, "-m", "ensurepip", "--upgrade"]
+    ensurepip_command = [sys.executable, "-m", "ensurepip", "--upgrade", "--default-pip"]
     if has_ensurepip():
         logger("检测到 ensurepip，正在本地初始化 pip。")
         return_code = stream_command(ensurepip_command)
@@ -2037,7 +2092,12 @@ def bootstrap_pip(log: Callable[[str], None] | None = None) -> dict[str, str]:
     script_path = download_get_pip()
     logger(f"已下载 pip 引导脚本：{script_path}")
 
-    install_command = [sys.executable, str(script_path), "--disable-pip-version-check"]
+    install_command = [
+        sys.executable,
+        str(script_path),
+        "--disable-pip-version-check",
+        "--no-warn-script-location",
+    ]
     return_code = stream_command(install_command)
     if return_code != 0:
         raise RuntimeError(f"在线安装 pip 失败，退出码为 {return_code}。本地 wheel 引导也已失败，请查看上方日志。")
@@ -2095,6 +2155,8 @@ def build_install_plan(
             "pip",
             "install",
             "--upgrade",
+            "--no-user",
+            "--no-warn-script-location",
             "--prefer-binary",
             "--timeout",
             "180",
@@ -2151,6 +2213,8 @@ def build_install_plan(
                     "--isolated",
                     "install",
                     "--upgrade",
+                    "--no-user",
+                    "--no-warn-script-location",
                     "--prefer-binary",
                     "--timeout",
                     "180",

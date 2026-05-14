@@ -78,7 +78,10 @@ def _backend_process_env(*, include_extra_index: bool = True) -> dict[str, str]:
     env["PYTHONUTF8"] = "1"
     env["PYTHONIOENCODING"] = "utf-8"
     env["PYTHONUNBUFFERED"] = "1"
+    env["PYTHONNOUSERSITE"] = "1"
     env["PIP_NO_INPUT"] = "1"
+    env["PIP_NO_USER"] = "1"
+    env["PIP_NO_WARN_SCRIPT_LOCATION"] = "1"
     if not include_extra_index:
         env.pop("PIP_EXTRA_INDEX_URL", None)
     return env
